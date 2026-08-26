@@ -1,0 +1,7 @@
+{
+  "name": "@ros-chromium/rtc",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TODO (plan.md Phase 5) — WebRTC data channel wrapper + signaling client, for remote sessions only. Not on the critical path for local teleop."
+}

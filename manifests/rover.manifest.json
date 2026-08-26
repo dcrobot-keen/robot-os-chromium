@@ -1,0 +1,9 @@
+{
+  "robot": "rover-01",
+  "transport": "tcp-prototype",
+  "motors": {
+    "left": { "setVelocity": "SET_VELOCITY.left_mps", "velocity": "GET_ENCODER.left_ticks" },
+    "right": { "setVelocity": "SET_VELOCITY.right_mps", "velocity": "GET_ENCODER.right_ticks" }
+  },
+  "imu": { "orientation": "GET_IMU" }
+}

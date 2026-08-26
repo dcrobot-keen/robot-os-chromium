@@ -1,0 +1,7 @@
+{
+  "name": "@ros-chromium/device-abstraction",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TODO (plan.md Phase 3) — WoT-style property/action/event wrappers over transport, driven by per-robot manifests (see ../../manifests/rover.manifest.json)."
+}

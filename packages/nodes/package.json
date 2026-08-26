@@ -1,0 +1,7 @@
+{
+  "name": "@ros-chromium/nodes",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TODO (plan.md Phase 3) — node base class plus reference nodes (TeleopNode, OdometryNode, SafetyMonitorNode), each running in its own Web Worker."
+}

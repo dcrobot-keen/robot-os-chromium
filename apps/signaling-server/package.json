@@ -1,0 +1,7 @@
+{
+  "name": "@ros-chromium/signaling-server",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TODO (plan.md Phase 5) — minimal WebSocket server for SDP/ICE exchange and the robot registry. Never carries robot command or telemetry traffic."
+}

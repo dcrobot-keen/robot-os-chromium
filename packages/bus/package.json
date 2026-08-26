@@ -1,0 +1,7 @@
+{
+  "name": "@ros-chromium/bus",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TODO (plan.md Phase 3) — local pub/sub over BroadcastChannel, with a SharedWorker owning the actual hardware connection so multiple tabs don't fight over it."
+}

@@ -1,0 +1,7 @@
+{
+  "name": "@ros-chromium/dashboard",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "TODO (plan.md Phase 3) — browser HMI: teleop control, telemetry, 3D pose view. Subscribes to @ros-chromium/bus like any other node."
+}

@@ -1,0 +1,10 @@
+{
+  "name": "ros-chromium-web",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Browser-side stack: hardware bridge, device abstraction, nodes, comms, HMI. See research.md and plan.md.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}

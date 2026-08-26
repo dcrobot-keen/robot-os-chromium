@@ -1,0 +1,8 @@
+{
+  "name": "@ros-chromium/transport",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "HardwareTransport interface, the wire protocol codec shared with firmware, and the transport implementations (WebSerial done last, since it needs real hardware — see plan.md Phase 1/2).",
+  "main": "src/index.js"
+}
