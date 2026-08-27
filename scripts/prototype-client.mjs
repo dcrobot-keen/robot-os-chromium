@@ -1,67 +1,67 @@
-// Simplest working prototype: proves the wire protocol and the 300ms
-// watchdog/E-STOP work end to end, standing in for a browser tab until
-// WebSerial + real hardware are wired up (plan.md Phase 1/2, research.md §2).
+// Simplest working prototype, now over WebSocket: proves the wire protocol,
+// the 300ms watchdog/E-STOP, and the actual WebSocketTransport class work
+// end to end. This script is a Node.js stand-in for a browser tab — see
+// apps/dashboard/index.html for the real-browser version of the same test.
 //
 // Run in two terminals:
 //   1) node ../firmware/sim/src/index.js
 //   2) node scripts/prototype-client.mjs
 //
-// What it does: connects the way a browser tab eventually will, heartbeats
-// for a bit, sends one velocity command, then destroys the connection
-// WITHOUT a goodbye — simulating a crashed tab or a pulled USB cable — and
-// exits immediately. This script cannot observe the motors stopping; that's
-// the point. Proof is in the firmware sim's own log, which should show a
-// watchdog ESTOP ~300ms after the last heartbeat, logged after this process
-// has already exited.
+// What it does: connects the way a browser tab does, heartbeats for a bit,
+// sends one velocity command, then exits the process WITHOUT closing the
+// WebSocket first — simulating a crashed tab (a clean tab close would send
+// a WS close frame; a crash doesn't). This script cannot observe the
+// motors stopping; that's the point. Proof is in the firmware sim's own
+// log, which should show a watchdog ESTOP ~300ms after the last heartbeat,
+// logged after this process has already exited.
 
-import net from 'node:net';
-import { encodeFrame, FrameDecoder } from '../packages/transport/src/frame.js';
+import { WebSocketTransport } from '../packages/transport/src/websocket-transport.js';
+import { encodeFrame } from '../packages/transport/src/frame.js';
 import { CMD } from '../packages/transport/src/commands.js';
 
-const HOST = '127.0.0.1';
 const PORT = Number(process.env.SIM_PORT || 8765);
 
 function log(msg) {
   console.log(`[client ${new Date().toISOString()}] ${msg}`);
 }
 
-function sendHeartbeat(socket, seq) {
+function heartbeatFrame(seq) {
   const payload = new Uint8Array(2);
   new DataView(payload.buffer).setUint16(0, seq, true);
-  socket.write(encodeFrame(CMD.HEARTBEAT, payload));
+  return encodeFrame(CMD.HEARTBEAT, payload);
 }
 
-function sendVelocity(socket, left, right) {
+function velocityFrame(left, right) {
   const payload = new Uint8Array(8);
   const dv = new DataView(payload.buffer);
   dv.setFloat32(0, left, true);
   dv.setFloat32(4, right, true);
-  socket.write(encodeFrame(CMD.SET_VELOCITY, payload));
-  log(`sent SET_VELOCITY left=${left} right=${right}`);
+  return encodeFrame(CMD.SET_VELOCITY, payload);
 }
 
-const socket = net.connect(PORT, HOST, () => log(`connected to firmware sim at ${HOST}:${PORT}`));
+const transport = new WebSocketTransport(`ws://127.0.0.1:${PORT}`);
 
-const decoder = new FrameDecoder();
-socket.on('data', (data) => {
-  for (const { cmd, payload } of decoder.push(data)) {
-    if (cmd === CMD.HEARTBEAT) {
-      const seq = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint16(0, true);
-      log(`heartbeat ack seq=${seq}`);
-    }
+transport.onFrame(({ cmd, payload }) => {
+  if (cmd === CMD.HEARTBEAT) {
+    const seq = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint16(0, true);
+    log(`heartbeat ack seq=${seq}`);
   }
 });
-socket.on('error', (err) => log(`socket error: ${err.message}`));
+
+await transport.connect();
+log(`connected to firmware sim on port ${PORT}`);
 
 let seq = 0;
-const heartbeatTimer = setInterval(() => sendHeartbeat(socket, seq++), 100);
-
-setTimeout(() => sendVelocity(socket, 0.5, 0.5), 150);
+const heartbeatTimer = setInterval(() => transport.send(heartbeatFrame(seq++)), 100);
 
 setTimeout(() => {
-  log('simulating crashed tab / pulled cable — destroying connection, no goodbye');
+  transport.send(velocityFrame(0.5, 0.5));
+  log('sent SET_VELOCITY left=0.5 right=0.5');
+}, 150);
+
+setTimeout(() => {
+  log('simulating a crashed tab — exiting without closing the WebSocket, no goodbye');
   clearInterval(heartbeatTimer);
-  socket.destroy();
   log('exiting. check the firmware sim log for the watchdog ESTOP ~300ms from now.');
-  process.exit(0);
+  process.exit(0); // deliberately not transport._ws.close() — a real crash doesn't get to say goodbye either
 }, 350);

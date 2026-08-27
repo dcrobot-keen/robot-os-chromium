@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>rover-01 connectivity test</title>
+<style>
+  body { font-family: ui-monospace, monospace; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 16px; }
+  #status { font-weight: bold; }
+  #status.connected { color: #2a7d2a; }
+  #status.disconnected { color: #a33; }
+  button { font-family: inherit; padding: 6px 14px; margin-right: 8px; }
+  #log { background: #111; color: #ddd; padding: 10px; height: 260px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+  .row { margin: 12px 0; }
+  input[type="range"] { width: 200px; }
+</style>
+</head>
+<body>
+  <h1>rover-01 connectivity test — real browser, real WebSocket</h1>
+  <p>
+    This is a bare-bones test page, not the real dashboard (that's Phase 3). It exists to prove the
+    architecture works from an actual Chromium tab, not just a Node.js client. Close this tab (or this
+    whole browser) while it's connected — the firmware sim's own log should show a watchdog ESTOP about
+    300ms later, with no code from this page involved in causing it.
+  </p>
+
+  <div class="row">Status: <span id="status" class="disconnected">disconnected</span></div>
+  <div class="row">
+    <button id="connectBtn">Connect</button>
+    Heartbeats sent: <span id="hbCount">0</span>
+  </div>
+  <div class="row">
+    Left <input id="left" type="range" min="-1" max="1" step="0.1" value="0" />
+    Right <input id="right" type="range" min="-1" max="1" step="0.1" value="0" />
+    <button id="sendVelocity">Send SET_VELOCITY</button>
+  </div>
+  <div class="row"><div id="log"></div></div>
+
+  <script type="module">
+    import { WebSocketTransport } from '../../packages/transport/src/websocket-transport.js';
+    import { encodeFrame } from '../../packages/transport/src/frame.js';
+    import { CMD } from '../../packages/transport/src/commands.js';
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const hbCountEl = document.getElementById('hbCount');
+
+    function log(msg) {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(line);
+    }
+
+    function heartbeatFrame(seq) {
+      const payload = new Uint8Array(2);
+      new DataView(payload.buffer).setUint16(0, seq, true);
+      return encodeFrame(CMD.HEARTBEAT, payload);
+    }
+
+    function velocityFrame(left, right) {
+      const payload = new Uint8Array(8);
+      const dv = new DataView(payload.buffer);
+      dv.setFloat32(0, left, true);
+      dv.setFloat32(4, right, true);
+      return encodeFrame(CMD.SET_VELOCITY, payload);
+    }
+
+    let transport = null;
+    let heartbeatTimer = null;
+    let seq = 0;
+
+    document.getElementById('connectBtn').addEventListener('click', async () => {
+      const port = 8765;
+      transport = new WebSocketTransport(`ws://127.0.0.1:${port}`);
+
+      transport.onFrame(({ cmd, payload }) => {
+        if (cmd === CMD.HEARTBEAT) {
+          const ackSeq = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint16(0, true);
+          hbCountEl.textContent = String(ackSeq + 1);
+        }
+      });
+      transport.onDisconnect(() => {
+        statusEl.textContent = 'disconnected';
+        statusEl.className = 'disconnected';
+        clearInterval(heartbeatTimer);
+        log('disconnected from firmware sim');
+      });
+
+      log(`connecting to ws://127.0.0.1:${port} ...`);
+      await transport.connect();
+      statusEl.textContent = 'connected';
+      statusEl.className = 'connected';
+      log('connected — sending heartbeats every 100ms');
+
+      heartbeatTimer = setInterval(() => transport.send(heartbeatFrame(seq++)), 100);
+    });
+
+    document.getElementById('sendVelocity').addEventListener('click', () => {
+      if (!transport) return log('not connected');
+      const left = Number(document.getElementById('left').value);
+      const right = Number(document.getElementById('right').value);
+      transport.send(velocityFrame(left, right));
+      log(`sent SET_VELOCITY left=${left} right=${right}`);
+    });
+  </script>
+</body>
+</html>

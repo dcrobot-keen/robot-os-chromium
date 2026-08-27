@@ -5,18 +5,17 @@
 //
 // connect(): Promise<void>
 // send(frame: Uint8Array): Promise<void>
-// onFrame(cb: (frame: Uint8Array) => void): void
+// onFrame(cb: (frame: { cmd: number, payload: Uint8Array }) => void): void
 // onDisconnect(cb: () => void): void
 //
 // Implemented so far:
-//   - none exported yet. The simplest prototype (scripts/prototype-client.mjs
-//     at the repo root) talks raw TCP directly with frame.js, deliberately
-//     skipping this interface to validate the protocol/watchdog first.
+//   - WebSocketTransport — uses the global WebSocket, so it runs unchanged
+//     in a real browser tab and in a Node.js test client (Node 22+).
 //
-// TODO, in order (plan.md Phase 1 → 4):
-//   - WebSerialTransport   (needs real hardware to test against)
-//   - WebSocketTransport   (browser-facing equivalent of the TCP prototype)
+// TODO, in order (plan.md Phase 2 → 4):
+//   - WebSerialTransport   (needs a real board to test against)
 //   - WebUSBTransport / WebHIDTransport / WebBluetoothTransport (as needed)
 
 export * from './frame.js';
 export * from './commands.js';
+export * from './websocket-transport.js';
