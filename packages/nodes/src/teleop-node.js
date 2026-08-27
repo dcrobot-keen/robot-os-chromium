@@ -18,13 +18,24 @@ function applyDeadzone(v) {
 }
 
 export class TeleopNode {
-  constructor(bus, { topic, maxSpeed = 1.0, pollMs = 50, gamepadIndex = 0 } = {}) {
+  // onTick(pad), if given, fires on every poll (pad is null when no
+  // gamepad is present) — added to diagnose a real-browser test where
+  // publishes arrived far less often, and with far more value repetition,
+  // than a 50ms unconditional-publish loop should ever produce (see
+  // plan.md, "실사용 테스트 — 게임패드 조작 확인"). A Node test with a
+  // mocked navigator.getGamepads() showed the tick loop itself firing
+  // close to the configured interval, so the discrepancy is suspected to
+  // be Chrome's Gamepad API state only refreshing on animation frames
+  // rather than on an arbitrary setInterval — onTick lets that be checked
+  // directly instead of guessed at.
+  constructor(bus, { topic, maxSpeed = 1.0, pollMs = 50, gamepadIndex = 0, onTick } = {}) {
     if (!topic) throw new Error('TeleopNode requires a topic');
     this._bus = bus;
     this._topic = topic;
     this._maxSpeed = maxSpeed;
     this._pollMs = pollMs;
     this._gamepadIndex = gamepadIndex;
+    this._onTick = onTick;
     this._timer = null;
   }
 
@@ -42,6 +53,7 @@ export class TeleopNode {
 
   _tick() {
     const pad = this.connectedGamepad();
+    if (this._onTick) this._onTick(pad);
     if (!pad) return;
 
     const forward = applyDeadzone(-pad.axes[1]); // stick up reports negative Y

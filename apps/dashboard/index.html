@@ -39,6 +39,10 @@
     <button id="sendVelocity">Send</button>
   </div>
   <div class="row">last commanded: left=<span id="cmdLeft">0</span> right=<span id="cmdRight">0</span></div>
+  <div class="row">
+    teleop ticks/s: <span id="teleopRate">–</span> · gamepad seen/s: <span id="teleopSeenRate">–</span> ·
+    raw axes: <span id="teleopAxes">–</span>
+  </div>
   <div class="row"><div id="log"></div></div>
 
   <script type="module">
@@ -61,6 +65,9 @@
     const hbGapEl = document.getElementById('hbGap');
     const cmdLeftEl = document.getElementById('cmdLeft');
     const cmdRightEl = document.getElementById('cmdRight');
+    const teleopRateEl = document.getElementById('teleopRate');
+    const teleopSeenRateEl = document.getElementById('teleopSeenRate');
+    const teleopAxesEl = document.getElementById('teleopAxes');
 
     function log(msg) {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -86,6 +93,19 @@
     let teleop = null;
     let sentCount = 0;
     let ackCount = 0;
+
+    // Rate counters for TeleopNode's onTick, reset every second — added to
+    // check whether _tick() is really firing at the configured ~50ms
+    // interval in a real browser with a real gamepad (see teleop-node.js's
+    // comment on why this exists).
+    let tickCountThisSecond = 0;
+    let seenCountThisSecond = 0;
+    setInterval(() => {
+      teleopRateEl.textContent = String(tickCountThisSecond);
+      teleopSeenRateEl.textContent = String(seenCountThisSecond);
+      tickCountThisSecond = 0;
+      seenCountThisSecond = 0;
+    }, 1000);
 
     connectBtn.addEventListener('click', async () => {
       if (transport) return log('already connected — ignoring extra Connect click');
@@ -141,7 +161,16 @@
         }
       });
 
-      teleop = new TeleopNode(bus, { topic: DRIVE_CMD_TOPIC });
+      teleop = new TeleopNode(bus, {
+        topic: DRIVE_CMD_TOPIC,
+        onTick: (pad) => {
+          tickCountThisSecond++;
+          if (pad) {
+            seenCountThisSecond++;
+            teleopAxesEl.textContent = pad.axes.map((a) => a.toFixed(2)).join(', ');
+          }
+        },
+      });
       teleop.start();
 
       heartbeat = startHeartbeat(transport, {
