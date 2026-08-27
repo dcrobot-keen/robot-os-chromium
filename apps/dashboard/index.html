@@ -27,7 +27,8 @@
   <div class="row">Status: <span id="status" class="disconnected">disconnected</span></div>
   <div class="row">
     <button id="connectBtn">Connect</button>
-    Heartbeats sent: <span id="hbCount">0</span>
+    Heartbeats sent: <span id="hbSentCount">0</span> · acked: <span id="hbAckCount">0</span> ·
+    last send gap: <span id="hbGap">–</span>
   </div>
   <div class="row">
     Left <input id="left" type="range" min="-1" max="1" step="0.1" value="0" />
@@ -43,7 +44,10 @@
 
     const statusEl = document.getElementById('status');
     const logEl = document.getElementById('log');
-    const hbCountEl = document.getElementById('hbCount');
+    const connectBtn = document.getElementById('connectBtn');
+    const hbSentCountEl = document.getElementById('hbSentCount');
+    const hbAckCountEl = document.getElementById('hbAckCount');
+    const hbGapEl = document.getElementById('hbGap');
 
     function log(msg) {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -69,39 +73,80 @@
     let transport = null;
     let heartbeatTimer = null;
     let seq = 0;
+    let sentCount = 0;
+    let ackCount = 0;
+    let lastSendAt = null;
 
-    document.getElementById('connectBtn').addEventListener('click', async () => {
+    // Anything above ~150ms between sends means the 100ms setInterval is
+    // being throttled or stalled — log it loudly instead of silently
+    // hoping the next tick catches up. This is what would have shown a
+    // heartbeat gap in real time instead of only finding out from the
+    // firmware sim's ESTOP log after the fact.
+    const GAP_WARN_MS = 150;
+
+    connectBtn.addEventListener('click', async () => {
+      if (transport) return log('already connected — ignoring extra Connect click');
+      connectBtn.disabled = true;
+
       const port = 8765;
       transport = new WebSocketTransport(`ws://127.0.0.1:${port}`);
 
       transport.onFrame(({ cmd, payload }) => {
         if (cmd === CMD.HEARTBEAT) {
-          const ackSeq = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint16(0, true);
-          hbCountEl.textContent = String(ackSeq + 1);
+          ackCount++;
+          hbAckCountEl.textContent = String(ackCount);
         }
       });
       transport.onDisconnect(() => {
         statusEl.textContent = 'disconnected';
         statusEl.className = 'disconnected';
         clearInterval(heartbeatTimer);
+        transport = null;
+        connectBtn.disabled = false;
         log('disconnected from firmware sim');
       });
 
       log(`connecting to ws://127.0.0.1:${port} ...`);
-      await transport.connect();
+      try {
+        await transport.connect();
+      } catch (err) {
+        log(`connect failed: ${err.message || err}`);
+        transport = null;
+        connectBtn.disabled = false;
+        return;
+      }
       statusEl.textContent = 'connected';
       statusEl.className = 'connected';
       log('connected — sending heartbeats every 100ms');
+      lastSendAt = performance.now();
 
-      heartbeatTimer = setInterval(() => transport.send(heartbeatFrame(seq++)), 100);
+      heartbeatTimer = setInterval(async () => {
+        const now = performance.now();
+        const gap = lastSendAt === null ? 0 : now - lastSendAt;
+        lastSendAt = now;
+        hbGapEl.textContent = `${gap.toFixed(0)}ms`;
+        if (gap > GAP_WARN_MS) log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — timer was throttled or blocked`);
+
+        try {
+          await transport.send(heartbeatFrame(seq++));
+          sentCount++;
+          hbSentCountEl.textContent = String(sentCount);
+        } catch (err) {
+          log(`heartbeat send failed: ${err.message || err}`);
+        }
+      }, 100);
     });
 
-    document.getElementById('sendVelocity').addEventListener('click', () => {
+    document.getElementById('sendVelocity').addEventListener('click', async () => {
       if (!transport) return log('not connected');
       const left = Number(document.getElementById('left').value);
       const right = Number(document.getElementById('right').value);
-      transport.send(velocityFrame(left, right));
-      log(`sent SET_VELOCITY left=${left} right=${right}`);
+      try {
+        await transport.send(velocityFrame(left, right));
+        log(`sent SET_VELOCITY left=${left} right=${right}`);
+      } catch (err) {
+        log(`SET_VELOCITY send failed: ${err.message || err}`);
+      }
     });
   </script>
 </body>
