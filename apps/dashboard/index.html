@@ -17,13 +17,16 @@
 </style>
 </head>
 <body>
-  <h1>rover-01 teleop — Phase 3</h1>
+  <h1>rover-01 teleop — Phase 4</h1>
   <p>
     Gamepad drives the rover: <code>TeleopNode</code> polls the Gamepad API and publishes
     <code>{left, right}</code> onto the local bus; this page's own bus subscription forwards it to
-    <code>createDriveDevice</code>, which encodes a <code>SET_VELOCITY</code> frame and sends it over
-    <code>WebSocketTransport</code>. The manual sliders below go through the exact same bus topic —
-    there's no separate code path for manual vs. gamepad control.
+    <code>createDriveDevice</code>, which encodes a <code>SET_VELOCITY</code> frame and sends it through
+    <code>HardwareBridgeClient</code>. The manual sliders below go through the exact same bus topic —
+    there's no separate code path for manual vs. gamepad control. Unlike Phase 3, this tab doesn't hold
+    its own connection: <code>HardwareBridgeClient</code> talks to a <code>SharedWorker</code> that owns
+    the one real connection for every tab of this page. Open this page in a second tab to see it —
+    the firmware sim's log should show only one <code>connection opened</code>, not two.
   </p>
 
   <div class="row">Connection: <span id="status" class="disconnected">disconnected</span></div>
@@ -46,15 +49,14 @@
   <div class="row"><div id="log"></div></div>
 
   <script type="module">
-    import { WebSocketTransport, startHeartbeat, CMD } from '../../packages/transport/src/index.js';
+    import { CMD } from '../../packages/transport/src/index.js';
     import { loadManifest, createDriveDevice } from '../../packages/device-abstraction/src/index.js';
-    import { LocalBus } from '../../packages/bus/src/index.js';
+    import { LocalBus, HardwareBridgeClient } from '../../packages/bus/src/index.js';
     import { TeleopNode } from '../../packages/nodes/src/index.js';
 
     const DRIVE_CMD_TOPIC = 'rover-01/drive/cmd_vel';
     const MANIFEST_URL = '/manifests/rover.manifest.json';
-    const WS_URL = 'ws://127.0.0.1:8765';
-    const GAP_WARN_MS = 150;
+    const WORKER_URL = '/packages/bus/src/hardware-bridge-worker.js';
 
     const statusEl = document.getElementById('status');
     const gamepadStatusEl = document.getElementById('gamepadStatus');
@@ -87,8 +89,7 @@
       log('gamepad disconnected');
     });
 
-    let transport = null;
-    let heartbeat = null;
+    let transport = null; // a HardwareBridgeClient, not a real connection — see the note in the intro paragraph above
     let bus = null;
     let teleop = null;
     let sentCount = 0;
@@ -115,7 +116,7 @@
       const manifest = await loadManifest(MANIFEST_URL);
       log(`manifest loaded: robot=${manifest.robot}`);
 
-      transport = new WebSocketTransport(WS_URL);
+      transport = new HardwareBridgeClient(WORKER_URL);
       const drive = createDriveDevice(transport, manifest);
       bus = new LocalBus(`ros-chromium/${manifest.robot}`);
 
@@ -128,15 +129,26 @@
       transport.onDisconnect(() => {
         statusEl.textContent = 'disconnected';
         statusEl.className = 'disconnected';
-        heartbeat?.stop();
         teleop?.stop();
         bus?.close();
         transport = null;
         connectBtn.disabled = false;
-        log('disconnected from firmware sim');
+        log('disconnected — worker lost its connection to the firmware sim');
       });
+      // Heartbeating itself now happens once, inside the worker, shared by
+      // every tab — this tab just listens for what the worker reports.
+      transport.onHeartbeatSent(() => {
+        sentCount++;
+        hbSentCountEl.textContent = String(sentCount);
+      });
+      transport.onHeartbeatGap((gap) => {
+        hbGapEl.textContent = `${gap.toFixed(0)}ms`;
+        log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — worker's timer was throttled or blocked`);
+      });
+      transport.onHeartbeatError((err) => log(`heartbeat send failed: ${err.message || err}`));
+      transport.onSendError((err) => log(`send failed: ${err.message || err}`));
 
-      log(`connecting to ${WS_URL} ...`);
+      log(`connecting via shared worker (${WORKER_URL}) ...`);
       try {
         await transport.connect();
       } catch (err) {
@@ -147,7 +159,7 @@
       }
       statusEl.textContent = 'connected';
       statusEl.className = 'connected';
-      log('connected');
+      log('connected — this tab is one of possibly several sharing the same worker connection');
 
       // Every drive command — gamepad or manual — flows through this one
       // subscription. There's exactly one place that calls drive.setVelocity.
@@ -172,19 +184,6 @@
         },
       });
       teleop.start();
-
-      heartbeat = startHeartbeat(transport, {
-        gapWarnMs: GAP_WARN_MS,
-        onGap: (gap) => {
-          hbGapEl.textContent = `${gap.toFixed(0)}ms`;
-          log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — timer was throttled or blocked`);
-        },
-        onSend: () => {
-          sentCount++;
-          hbSentCountEl.textContent = String(sentCount);
-        },
-        onSendError: (err) => log(`heartbeat send failed: ${err.message || err}`),
-      });
     });
 
     document.getElementById('sendVelocity').addEventListener('click', () => {

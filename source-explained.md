@@ -2,9 +2,9 @@
 
 이 레포에 실제로 존재하는 코드 파일들을 하나씩 설명한다. 아키텍처 구상이 아니라 "지금 여기 있는 코드가 정확히 무엇을 하는가"를 남기는 문서다. `packages/rtc`와 `apps/signaling-server`만 아직 `package.json`뿐인 빈 자리이고, 나머지(`transport`, `bus`, `device-abstraction`, `nodes`, `scripts/`, `apps/dashboard`)는 전부 실제로 동작하는 코드다.
 
-## package.json / pnpm-workspace.yaml
+## package.json
 
-루트에 있는 pnpm 워크스페이스 정의. `packages/*`와 `apps/*` 아래를 전부 하나의 워크스페이스로 묶는다. 아직 `pnpm install`을 실행한 적은 없다 — 지금까지는 어떤 패키지도 서로를 `import`로 참조하지 않고 `prototype-client.mjs`가 `packages/transport/src`를 상대 경로로 직접 불러오는 방식이라, 워크스페이스 링크가 없어도 동작한다.
+루트에 있는 npm 워크스페이스 정의(`workspaces: ["packages/*", "apps/*"]`). 원래 plan.md엔 pnpm+Turborepo라고 적어뒀었는데 실제로 쓰인 건 plain `npm install`이었어서 문서를 정정했다 — `node_modules/@ros-chromium/*`에 각 패키지로의 심볼릭 링크가 생겨 있다(`.gitignore`로 제외, `package-lock.json`은 커밋). 다만 지금까지 만든 코드는 전부 상대 경로(`../../packages/transport/src/...`)로 서로를 불러오지, `@ros-chromium/transport` 같은 패키지 이름으로 import하는 곳은 아직 없다 — 그래서 이 워크스페이스 링크가 없어도 지금까지의 모든 코드는 동일하게 동작한다.
 
 ## packages/transport/src/commands.js
 
@@ -35,6 +35,18 @@
 `LocalBus` — `BroadcastChannel` 위에 토픽 이름으로 필터링하는 pub/sub을 얹은 것. 구현하면서 실제로 걸려 넘어진 버그가 하나 있어서 그대로 적어둔다.
 
 `BroadcastChannel`은 스펙상 **자기 자신이 보낸 메시지를 자기 자신에게는 전달하지 않는다** — 같은 채널 이름을 쓰는 *다른* `BroadcastChannel` 인스턴스에만 전달된다(같은 페이지 안에서 만든 다른 인스턴스여도 상관없이). 처음 짠 버전은 `publish()`가 `postMessage()`만 호출했는데, `apps/dashboard/index.html`에서 `TeleopNode`와 구독 로직이 **같은 `LocalBus` 인스턴스**를 공유하도록 짜다 보니 발행한 명령이 자기 자신의 구독자에게 영원히 전달되지 않는 상황이 됐다. Node로 직접 재현해서 확인했다(`bc.postMessage()` 후 같은 인스턴스의 `onmessage`가 500ms 동안 안 옴 → 확정). 지금 버전은 `publish()`가 `postMessage()`와 함께 `_dispatch()`를 직접 호출해서 같은 인스턴스의 구독자에게도 즉시 전달하도록 고쳤다 — 그 결과 같은 인스턴스를 공유하든(대시보드처럼) 노드마다 별도 인스턴스를 만들든(원래 의도했던 구조) 둘 다 정상 동작한다. 두 경우 다 Node 스크립트로 실제 검증했다.
+
+## packages/bus/src/hardware-bridge-worker.js, hardware-bridge-client.js
+
+Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공유하는 부분. `hardware-bridge-worker.js`는 일반 모듈이 아니라 `new SharedWorker(url, { type: 'module' })`로 로드되는 워커 스크립트 자체다 — 이 스크립트 하나가 오리진 전체에서 단 하나만 실행되고, 탭이 몇 개든 전부 이 하나의 인스턴스에 `MessagePort`로 연결된다.
+
+워커 안에는 진짜 `WebSocketTransport` 인스턴스가 딱 하나만 존재한다. 첫 번째 탭이 `{type:'connect'}`를 보내면 그때 실제로 `transport.connect()`를 호출하고 `startHeartbeat()`도 그때 한 번만 시작한다(`ensureConnected()`가 진행 중인 연결 시도를 프라미스로 캐싱해서 여러 탭이 동시에 연결을 요청해도 실제 연결 시도는 한 번만 일어나게 막는다). 이후 새로 열리는 탭은 이미 연결되어 있으면 그 상태를 바로 돌려받는다. 펌웨어에서 오는 프레임(하트비트 에코 포함)과 연결 상태, 하트비트 진단(간격 경고, 전송 실패)은 전부 `broadcast()`로 연결된 모든 포트에 똑같이 전달된다.
+
+`hardware-bridge-client.js`의 `HardwareBridgeClient`는 탭 쪽에서 이 워커에 붙는 프록시다. 의도적으로 `WebSocketTransport`와 같은 모양(`connect()`, `send()`, `onFrame()`, `onDisconnect()`)을 그대로 구현했다 — `packages/transport`의 `HardwareTransport` 인터페이스를 처음 만들 때 "구현체를 바꿔 끼워도 위 레이어는 안 건드린다"는 게 목적이었는데, 이번이 그 목적이 실제로 쓰인 첫 사례다. `createDriveDevice(transport, manifest)`는 `WebSocketTransport`를 받든 `HardwareBridgeClient`를 받든 코드 한 줄도 안 바뀐다.
+
+한 가지 의도적인 단순화: `send()`는 워커에 메시지를 posting만 하고 바로 resolve되는 fire-and-forget이다. 매 프레임(특히 100ms마다 나가는 하트비트)마다 워커의 응답을 기다리는 왕복을 만들지 않기 위한 선택이고, 대신 전송이 실패하면 `onSendError` 콜백으로 비동기 통지된다 — 실패가 어느 `send()` 호출 때문이었는지 정확히 짚어주지는 못한다.
+
+이 두 파일은 `SharedWorker`, `self.onconnect` 같은 브라우저 전용 API에 의존해서 Node에서는 실행할 수 없다(Node에 `SharedWorker`가 없다). `node --check`로 문법만 확인했고, 실제 동작(탭 두 개를 열었을 때 펌웨어 로그에 `connection opened`가 한 번만 찍히는지, 탭을 하나씩 닫아도 나머지 탭은 멀쩡한지, 모든 탭이 닫히고 나서야 워치독이 독자적으로 정지시키는지)은 이 스택에서 처음으로 사람이 실제 브라우저로 직접 검증해야 하는 부분이다.
 
 ## packages/device-abstraction/src/manifest.js, drive-device.js
 
@@ -82,6 +94,8 @@ Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/
 Phase 1~2에서는 연결성 테스트용 최소 페이지였는데, 이번 Phase 3에서 실제 게임패드 teleop 대시보드로 바뀌었다. 연결 흐름과 하트비트 진단 로직(중복 Connect 가드, 전송 간격 경고, 전송 실패 로그)은 이전 버전에서 그대로 가져왔고, `startHeartbeat` 헬퍼로 옮겨서 코드는 오히려 줄었다.
 
 Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/rover.manifest.json`을 받아오고 → `WebSocketTransport`를 열고 → `createDriveDevice(transport, manifest)`로 주행 디바이스를 만들고 → `LocalBus`를 하나 만들어서 `rover-01/drive/cmd_vel` 토픽을 구독해 들어오는 `{left, right}`를 그대로 `drive.setVelocity()`에 넘기고 → `TeleopNode`를 그 버스에 붙여 시작하고 → `startHeartbeat`를 시작한다. 화면의 수동 슬라이더도 같은 토픽에 `publish`하는 것 말고는 하지 않는다 — 즉 게임패드든 수동 조작이든 마지막에 `drive.setVelocity()`를 호출하는 코드는 딱 한 군데(버스 구독 콜백)뿐이다. 페이지 상단에 이 구조를 그대로 설명해뒀다.
+
+Phase 4에서는 `WebSocketTransport`를 직접 여는 대신 `HardwareBridgeClient`를 연다는 점만 바뀌었다. `createDriveDevice`는 두 경우 모두 같은 방식으로 호출되므로(둘 다 `HardwareTransport` 모양을 구현하기 때문에) 이 위의 배선 설명은 그대로 유효하다. 달라진 건 하트비트 관련 UI 갱신 방식이다 — 이전엔 이 탭이 직접 `startHeartbeat`를 불렀지만, 지금은 그 호출 자체가 워커 안으로 옮겨갔기 때문에 이 탭은 `transport.onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`로 워커가 보내주는 소식을 받아 화면 숫자만 갱신한다.
 
 게임패드 연결 상태는 `window`의 `gamepadconnected`/`gamepaddisconnected` 이벤트로 표시한다 — 참고로 Gamepad API 스펙상 실제로 게임패드의 버튼이나 스틱을 한 번 조작해야 브라우저가 그 게임패드를 "연결됨"으로 인식하는 브라우저가 많다(연결만 해두고 가만히 있으면 안 뜰 수 있음).
 
