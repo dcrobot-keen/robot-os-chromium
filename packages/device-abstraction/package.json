@@ -3,5 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "TODO (plan.md Phase 3) — WoT-style property/action/event wrappers over transport, driven by per-robot manifests (see ../../manifests/rover.manifest.json)."
+  "description": "Manifest loader plus createDriveDevice, a WoT-style action wrapper over the transport's SET_VELOCITY frame (see ../../manifests/rover.manifest.json).",
+  "main": "src/index.js"
 }

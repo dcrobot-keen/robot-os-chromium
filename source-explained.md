@@ -1,6 +1,6 @@
 # 소스 코드 설명
 
-이 레포에 실제로 존재하는 코드 파일들을 하나씩 설명한다. 아키텍처 구상이 아니라 "지금 여기 있는 코드가 정확히 무엇을 하는가"를 남기는 문서다. 대부분의 패키지는 아직 `package.json`만 있는 빈 껍데기이고, 실제로 동작하는 코드는 `packages/transport`, `scripts/`, `apps/dashboard/index.html`뿐이다.
+이 레포에 실제로 존재하는 코드 파일들을 하나씩 설명한다. 아키텍처 구상이 아니라 "지금 여기 있는 코드가 정확히 무엇을 하는가"를 남기는 문서다. `packages/rtc`와 `apps/signaling-server`만 아직 `package.json`뿐인 빈 자리이고, 나머지(`transport`, `bus`, `device-abstraction`, `nodes`, `scripts/`, `apps/dashboard`)는 전부 실제로 동작하는 코드다.
 
 ## package.json / pnpm-workspace.yaml
 
@@ -22,28 +22,50 @@
 
 `connect()`는 `WebSocket`을 열고 `onopen`에서 resolve하는 프라미스를 반환하고, `onclose`가 오면 등록된 disconnect 콜백들을 부른다. `send()`는 그냥 `ws.send(frame)`이다 — 표준 `close()` 메서드는 항상 정상 종료 핸드셰이크를 보내기 때문에, "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지 자체를 죽여야 한다(아래 `prototype-client.mjs` 설명 참고).
 
+## packages/transport/src/heartbeat.js
+
+`startHeartbeat(transport, options)`. 원래는 `prototype-client.mjs`와 `apps/dashboard/index.html`에 거의 똑같은 하트비트 루프가 두 벌 있었는데, 실제 teleop 대시보드가 세 번째 자리가 되는 시점에 그냥 하나로 뽑아냈다. 100ms마다 하트비트 프레임을 보내고, 매 틱마다 직전 전송 이후 얼마나 지났는지(`performance.now()` 차이)를 재서 `gapWarnMs`(기본 150ms)를 넘으면 `onGap` 콜백을 부른다 — 이게 지난번 원인 불명의 23초 하트비트 정지 이후 추가한 진단 로직이다. `onSend`는 전송이 성공할 때마다, `onSendError`는 실패할 때마다 불린다. `stop()`으로 멈춘다.
+
 ## packages/transport/src/index.js
 
-`frame.js`, `commands.js`, `websocket-transport.js`를 재수출(`export *`)한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스의 모양을 적어뒀고, 지금은 `WebSocketTransport`가 그 모양을 구현한 첫 번째이자 유일한 구현체다. `WebSerialTransport`, `WebUSBTransport` 등은 여전히 TODO로 남아있다 — 실제 보드가 정해지면 `WebSocketTransport`와 똑같은 모양으로 하나 더 추가하면 되고, 그 위의 코드(device-abstraction, nodes, dashboard)는 건드릴 필요가 없는 게 이 인터페이스를 둔 이유다.
+`frame.js`, `commands.js`, `websocket-transport.js`, `heartbeat.js`를 재수출(`export *`)한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스의 모양을 적어뒀고, 지금은 `WebSocketTransport`가 그 모양을 구현한 첫 번째이자 유일한 구현체다. `WebSerialTransport`, `WebUSBTransport` 등은 여전히 TODO로 남아있다 — 실제 보드가 정해지면 `WebSocketTransport`와 똑같은 모양으로 하나 더 추가하면 되고, 그 위의 코드(device-abstraction, nodes, dashboard)는 건드릴 필요가 없는 게 이 인터페이스를 둔 이유다.
 
-## packages/{device-abstraction,bus,nodes,rtc}/package.json, apps/{dashboard,signaling-server}/package.json
+## packages/bus/src/local-bus.js
 
-이 다섯 곳은 전부 `package.json` 하나씩만 있는 빈 자리다. 각 파일의 `description` 필드에 이 패키지가 앞으로 뭘 담을지와 `plan.md`의 어느 단계에서 채워질지를 적어뒀다. 코드는 없다.
+`LocalBus` — `BroadcastChannel` 위에 토픽 이름으로 필터링하는 pub/sub을 얹은 것. 구현하면서 실제로 걸려 넘어진 버그가 하나 있어서 그대로 적어둔다.
+
+`BroadcastChannel`은 스펙상 **자기 자신이 보낸 메시지를 자기 자신에게는 전달하지 않는다** — 같은 채널 이름을 쓰는 *다른* `BroadcastChannel` 인스턴스에만 전달된다(같은 페이지 안에서 만든 다른 인스턴스여도 상관없이). 처음 짠 버전은 `publish()`가 `postMessage()`만 호출했는데, `apps/dashboard/index.html`에서 `TeleopNode`와 구독 로직이 **같은 `LocalBus` 인스턴스**를 공유하도록 짜다 보니 발행한 명령이 자기 자신의 구독자에게 영원히 전달되지 않는 상황이 됐다. Node로 직접 재현해서 확인했다(`bc.postMessage()` 후 같은 인스턴스의 `onmessage`가 500ms 동안 안 옴 → 확정). 지금 버전은 `publish()`가 `postMessage()`와 함께 `_dispatch()`를 직접 호출해서 같은 인스턴스의 구독자에게도 즉시 전달하도록 고쳤다 — 그 결과 같은 인스턴스를 공유하든(대시보드처럼) 노드마다 별도 인스턴스를 만들든(원래 의도했던 구조) 둘 다 정상 동작한다. 두 경우 다 Node 스크립트로 실제 검증했다.
+
+## packages/device-abstraction/src/manifest.js, drive-device.js
+
+`loadManifest(url)`은 `fetch()`로 매니페스트 JSON을 받아오는 것뿐이다. 스키마 검증은 없고, fetch 자체가 실패하면 에러를 던진다. 브라우저 전용이라(HTTP fetch를 가정) Node에서 직접 쓸 일은 없다.
+
+`createDriveDevice(transport, manifest)`가 이번 단계에서 아키텍처 문서의 원래 설계를 실제로 고친 지점이다. 처음 설계 문서에서는 `motors.left`/`motors.right`를 각각 독립적인 액션으로 그렸는데, 실제 와이어 프로토콜의 `SET_VELOCITY`는 좌우 바퀴 목표값을 **한 프레임에 같이** 담는다(`research.md` 참고). 그래서 "왼쪽 바퀴"와 "오른쪽 바퀴"를 독립된 액션으로 두면 하나를 호출할 때 다른 쪽 목표값을 모르는 문제가 생긴다. 구현 단계에서 이걸 발견하고 매니페스트와 코드를 둘 다 "drive"라는 단일 액션으로 고쳤다 — 디퍼렌셜 드라이브 로봇은 애초에 물리적으로 좌우 바퀴가 하나의 명령으로 같이 움직이는 게 맞으므로, 오히려 원래 아키텍처보다 실제 하드웨어를 더 정직하게 반영한다. `setVelocity(leftMps, rightMps)` 하나가 `SET_VELOCITY` 프레임 하나를 만들어 `transport.send()`한다. 속도 리드백(`velocity: "GET_ENCODER"`)은 펌웨어/시뮬레이터 양쪽 다 아직 안 만들어서 여기도 TODO다.
+
+## packages/nodes/src/teleop-node.js
+
+`TeleopNode` — Gamepad API를 폴링해서 버스에 주행 명령을 발행한다. Gamepad API에는 "축 값이 바뀌었다" 이벤트가 아예 없어서(연결/해제 이벤트만 있음), `navigator.getGamepads()`를 타이머로 주기적으로 읽는 것 말고는 방법이 없다. 기본 50ms 간격.
+
+왼쪽 스틱의 Y축(위로 밀면 음수가 나오므로 부호를 뒤집는다)을 전진/후진으로, X축을 회전으로 써서 아케이드 믹싱(`left = forward + turn`, `right = forward - turn`)으로 좌우 바퀴 목표 속도를 만든다. 스틱을 살짝만 건드려도 값이 남는 걸 막기 위해 ±0.08 미만은 0으로 죽이는 데드존을 뒀다. 이 파일은 Gamepad API와 `navigator`에 의존하기 때문에 Node에서는 테스트할 수 없다 — 이 스택에서 실제 브라우저가 있어야만 검증되는 첫 코드다.
+
+## packages/{rtc}/package.json, apps/{signaling-server}/package.json
+
+이 두 곳만 아직 `package.json` 하나씩만 있는 빈 자리다. `description` 필드에 앞으로 뭘 담을지와 `plan.md`의 어느 단계(Phase 5)에서 채워질지를 적어뒀다.
 
 ## manifests/rover.manifest.json
 
-레퍼런스 로버 하나를 기술하는 매니페스트 예시. `motors.left`/`motors.right`가 각각 `SET_VELOCITY`의 어느 필드에 속도를 쓰고 `GET_ENCODER`의 어느 필드에서 현재 속도를 읽어올지를 매핑하고, `imu.orientation`이 `GET_IMU`에 연결된다. 다만 `GET_ENCODER`와 `GET_IMU`는 펌웨어/시뮬레이터 양쪽 다 아직 구현되어 있지 않으므로, 지금 이 매니페스트는 "나중에 device-abstraction 패키지가 이런 모양의 파일을 읽게 될 것이다"를 보여주는 예시일 뿐 실제로 어디서 로드해서 쓰이고 있지는 않다.
+레퍼런스 로버 하나를 기술하는 매니페스트. 처음 버전은 `motors.left`/`motors.right`를 독립 액션으로 뒀는데, 위 `drive-device.js` 설명에 적은 이유로 `drive.setVelocity`/`drive.velocity` 하나로 합쳤다. `velocity`(`GET_ENCODER` 리드백)는 아직 펌웨어/시뮬레이터에 구현이 없어서 매핑만 있고 실제로 쓰이진 않는다.
 
 ## scripts/prototype-client.mjs
 
-`WebSocketTransport`를 실제로 가져다 쓰는 Node.js 클라이언트. 예전 버전은 `net` 소켓을 직접 다뤘지만, 지금은 이 레포가 만든 실제 추상화를 그대로 사용하도록(dogfooding) 바꿨다.
+`WebSocketTransport`와 `startHeartbeat`, `createDriveDevice`를 실제로 가져다 쓰는 Node.js 클라이언트. 처음엔 `net` 소켓을 직접 다뤘다가 `WebSocketTransport`로, 이번엔 하트비트 루프와 속도 명령까지 각각 `startHeartbeat`/`createDriveDevice`로 옮겨서 이 레포가 만든 추상화를 실제로 그대로 사용하도록(dogfooding) 계속 바꿔왔다.
 
 동작 순서는 다음과 같다.
 
 1. `WebSocketTransport`로 펌웨어(시뮬레이터)에 연결한다.
-2. 100ms 간격으로 `HEARTBEAT` 프레임을 계속 보낸다(`seq` 번호를 매번 증가시키면서).
-3. 연결 150ms 시점에 `SET_VELOCITY(0.5, 0.5)` 프레임을 한 번 보낸다.
-4. 연결 350ms 시점에 하트비트 전송을 멈추고, `transport._ws.close()`를 부르지 않은 채로 `process.exit(0)`을 호출해 프로세스를 그대로 죽인다.
+2. `startHeartbeat`로 100ms 간격 하트비트 전송을 시작한다.
+3. 연결 150ms 시점에 `createDriveDevice(transport, manifest).setVelocity(0.5, 0.5)`를 한 번 호출한다.
+4. 연결 350ms 시점에 `heartbeat.stop()`을 부르고, `transport._ws.close()`를 부르지 않은 채로 `process.exit(0)`을 호출해 프로세스를 그대로 죽인다.
 
 `close()`를 일부러 부르지 않는 게 핵심이다. WebSocket의 정상 종료는 양쪽이 종료 프레임을 주고받는 핸드셰이크인데, 실제 탭 크래시는 그런 인사를 할 겨를이 없다. 그래서 프로세스를 그냥 죽여서 OS가 강제로 소켓을 정리하게 만드는 쪽이 "크래시"를 더 정직하게 흉내낸다. 이 스크립트는 ESTOP이 실제로 발동했는지 스스로 확인하지 않는데, 4번 단계에서 프로세스가 완전히 죽어버리기 때문에 애초에 확인할 방법이 없고, 그게 이 테스트의 요점이다 — 정지가 실제로 일어났는지는 펌웨어(시뮬레이터) 쪽 로그에서, 이 프로세스가 죽고 한참 뒤의 타임스탬프로 확인해야 한다. 자세한 실행 결과와 재현 절차는 `plan.md`의 "Phase 1 검증 기록" 절에 남겨뒀다.
 
@@ -53,8 +75,14 @@ Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/
 
 ## apps/dashboard/index.html
 
-이번 단계에서 처음으로 만들어진, 진짜 브라우저에서 여는 페이지. Phase 3의 정식 dashboard가 아니라 "연결성 테스트"용 최소 페이지라는 걸 페이지 안에도 명시해뒀다. Connect 버튼을 누르면 `WebSocketTransport`로 펌웨어 시뮬레이터에 연결하고, 연결되는 즉시 100ms 간격 하트비트 전송을 시작한다. 슬라이더 두 개로 좌우 속도를 골라 `SET_VELOCITY`를 수동으로 보낼 수 있고, 로그 영역에 모든 이벤트가 타임스탬프와 함께 쌓인다.
+Phase 1~2에서는 연결성 테스트용 최소 페이지였는데, 이번 Phase 3에서 실제 게임패드 teleop 대시보드로 바뀌었다. 연결 흐름과 하트비트 진단 로직(중복 Connect 가드, 전송 간격 경고, 전송 실패 로그)은 이전 버전에서 그대로 가져왔고, `startHeartbeat` 헬퍼로 옮겨서 코드는 오히려 줄었다.
 
-이 페이지가 존재하는 이유는 단 하나, 지금까지의 모든 검증이 Node.js끼리의 통신이었고 실제 브라우저 탭은 이 흐름에 한 번도 들어온 적이 없었기 때문이다. 이 페이지를 열어 연결한 뒤 탭을 직접 닫아보면(또는 브라우저 전체를 종료해보면), 펌웨어 시뮬레이터 로그에 약 300ms 뒤 ESTOP이 찍히는 걸로 안전 모델이 실제 브라우저 환경에서도 성립하는지 처음으로 확인할 수 있다. `scripts/serve-dashboard.mjs`로 서빙한 뒤 `http://localhost:5173/apps/dashboard/index.html`로 열어야 한다.
+Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/rover.manifest.json`을 받아오고 → `WebSocketTransport`를 열고 → `createDriveDevice(transport, manifest)`로 주행 디바이스를 만들고 → `LocalBus`를 하나 만들어서 `rover-01/drive/cmd_vel` 토픽을 구독해 들어오는 `{left, right}`를 그대로 `drive.setVelocity()`에 넘기고 → `TeleopNode`를 그 버스에 붙여 시작하고 → `startHeartbeat`를 시작한다. 화면의 수동 슬라이더도 같은 토픽에 `publish`하는 것 말고는 하지 않는다 — 즉 게임패드든 수동 조작이든 마지막에 `drive.setVelocity()`를 호출하는 코드는 딱 한 군데(버스 구독 콜백)뿐이다. 페이지 상단에 이 구조를 그대로 설명해뒀다.
 
-첫 실사용 테스트에서 탭이 포그라운드에 있고 사용자가 계속 버튼을 누르고 있었는데도 서버 쪽에서 하트비트가 23초 가까이 끊겨 ESTOP이 발동하는 일이 있었다(자세한 내용은 `plan.md`의 "Phase 2 진행" 절 참고). 그 원인을 클라이언트 쪽에서 진단할 수 있는 근거가 전혀 없었다는 게 문제라서, 이후 세 가지를 보강했다. 첫째, `Connect` 버튼이 이미 연결된 상태에서 다시 눌리면 무시하도록 가드를 추가했다(이전에는 중복 클릭 시 이전 연결의 하트비트 인터벌이 참조를 잃은 채 계속 살아있을 수 있었다). 둘째, 하트비트를 "보내려고 시도한 시각" 사이의 간격을 매 틱마다 측정해서 150ms를 넘으면(기대값은 100ms) 화면 로그에 즉시 경고를 찍도록 했다 — 타이머가 스로틀링되거나 멈췄다는 걸 사후에 서버 로그로 추측하는 대신 그 순간 알 수 있게 하기 위해서다. 셋째, `transport.send()` 호출을 전부 `try/catch`로 감싸서 전송 실패가 조용히 묻히지 않고 로그에 남도록 했다. `hbSentCount`(실제 전송 시도 횟수)와 `hbAckCount`(펌웨어가 에코한 횟수)를 분리해서 보여주는 것도 같은 이유다 — 두 숫자가 벌어지면 "보내긴 했는데 응답이 없다"와 "애초에 안 보내지고 있다"를 구분할 수 있다.
+게임패드 연결 상태는 `window`의 `gamepadconnected`/`gamepaddisconnected` 이벤트로 표시한다 — 참고로 Gamepad API 스펙상 실제로 게임패드의 버튼이나 스틱을 한 번 조작해야 브라우저가 그 게임패드를 "연결됨"으로 인식하는 브라우저가 많다(연결만 해두고 가만히 있으면 안 뜰 수 있음).
+
+이 페이지가 존재하는 이유는 단 하나, 지금까지의 모든 검증이 Node.js끼리의 통신이었고 실제 브라우저 탭은 이 흐름에 한 번도 들어온 적이 없었기 때문이다. `scripts/serve-dashboard.mjs`로 서빙한 뒤 `http://localhost:5173/apps/dashboard/index.html`로 열어야 한다.
+
+### 실사용 테스트 히스토리
+
+첫 실사용 테스트에서 탭이 포그라운드에 있고 사용자가 계속 버튼을 누르고 있었는데도 하트비트가 23초 가까이 끊겨 ESTOP이 발동하는 원인 불명의 현상이 있었다. 진단 로직(중복 Connect 가드, 전송 간격 경고, 전송 실패 로그, sent/ack 카운터 분리)을 추가한 뒤 같은 방식(탭을 직접 닫는 것)으로 재시도했을 때는 경고 없이 깨끗하게 재현됐다 — `connection closed` 후 311ms 만에 ESTOP. 처음 현상은 재현되지 않아 일회성 현상으로 기록해뒀다. 전체 타임라인과 로그는 `plan.md`의 "Phase 2 진행" 절에 있다.

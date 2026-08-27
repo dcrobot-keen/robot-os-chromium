@@ -3,5 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "TODO (plan.md Phase 3) — node base class plus reference nodes (TeleopNode, OdometryNode, SafetyMonitorNode), each running in its own Web Worker."
+  "description": "TeleopNode (Gamepad API polling -> bus). OdometryNode and SafetyMonitorNode are still TODO (need GET_ENCODER/GET_IMU, which the firmware doesn't implement yet). None of these run in their own Web Worker yet — see plan.md.",
+  "main": "src/index.js"
 }

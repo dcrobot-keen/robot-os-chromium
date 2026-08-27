@@ -11,6 +11,8 @@
 // Implemented so far:
 //   - WebSocketTransport — uses the global WebSocket, so it runs unchanged
 //     in a real browser tab and in a Node.js test client (Node 22+).
+//   - startHeartbeat — the keep-alive loop every transport user needs,
+//     factored out once there were three copies of it (see heartbeat.js).
 //
 // TODO, in order (plan.md Phase 2 → 4):
 //   - WebSerialTransport   (needs a real board to test against)
@@ -19,3 +21,4 @@
 export * from './frame.js';
 export * from './commands.js';
 export * from './websocket-transport.js';
+export * from './heartbeat.js';

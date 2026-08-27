@@ -2,52 +2,65 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8" />
-<title>rover-01 connectivity test</title>
+<title>rover-01 teleop</title>
 <style>
   body { font-family: ui-monospace, monospace; max-width: 640px; margin: 40px auto; padding: 0 16px; }
   h1 { font-size: 16px; }
-  #status { font-weight: bold; }
-  #status.connected { color: #2a7d2a; }
-  #status.disconnected { color: #a33; }
+  #status, #gamepadStatus { font-weight: bold; }
+  .connected { color: #2a7d2a; }
+  .disconnected { color: #a33; }
   button { font-family: inherit; padding: 6px 14px; margin-right: 8px; }
-  #log { background: #111; color: #ddd; padding: 10px; height: 260px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+  #log { background: #111; color: #ddd; padding: 10px; height: 220px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
   .row { margin: 12px 0; }
   input[type="range"] { width: 200px; }
+  code { background: #eee; padding: 1px 4px; }
 </style>
 </head>
 <body>
-  <h1>rover-01 connectivity test — real browser, real WebSocket</h1>
+  <h1>rover-01 teleop — Phase 3</h1>
   <p>
-    This is a bare-bones test page, not the real dashboard (that's Phase 3). It exists to prove the
-    architecture works from an actual Chromium tab, not just a Node.js client. Close this tab (or this
-    whole browser) while it's connected — the firmware sim's own log should show a watchdog ESTOP about
-    300ms later, with no code from this page involved in causing it.
+    Gamepad drives the rover: <code>TeleopNode</code> polls the Gamepad API and publishes
+    <code>{left, right}</code> onto the local bus; this page's own bus subscription forwards it to
+    <code>createDriveDevice</code>, which encodes a <code>SET_VELOCITY</code> frame and sends it over
+    <code>WebSocketTransport</code>. The manual sliders below go through the exact same bus topic —
+    there's no separate code path for manual vs. gamepad control.
   </p>
 
-  <div class="row">Status: <span id="status" class="disconnected">disconnected</span></div>
+  <div class="row">Connection: <span id="status" class="disconnected">disconnected</span></div>
+  <div class="row">Gamepad: <span id="gamepadStatus" class="disconnected">none connected</span></div>
   <div class="row">
     <button id="connectBtn">Connect</button>
-    Heartbeats sent: <span id="hbSentCount">0</span> · acked: <span id="hbAckCount">0</span> ·
+    heartbeats sent: <span id="hbSentCount">0</span> · acked: <span id="hbAckCount">0</span> ·
     last send gap: <span id="hbGap">–</span>
   </div>
   <div class="row">
-    Left <input id="left" type="range" min="-1" max="1" step="0.1" value="0" />
+    Manual — Left <input id="left" type="range" min="-1" max="1" step="0.1" value="0" />
     Right <input id="right" type="range" min="-1" max="1" step="0.1" value="0" />
-    <button id="sendVelocity">Send SET_VELOCITY</button>
+    <button id="sendVelocity">Send</button>
   </div>
+  <div class="row">last commanded: left=<span id="cmdLeft">0</span> right=<span id="cmdRight">0</span></div>
   <div class="row"><div id="log"></div></div>
 
   <script type="module">
-    import { WebSocketTransport } from '../../packages/transport/src/websocket-transport.js';
-    import { encodeFrame } from '../../packages/transport/src/frame.js';
-    import { CMD } from '../../packages/transport/src/commands.js';
+    import { WebSocketTransport, startHeartbeat, CMD } from '../../packages/transport/src/index.js';
+    import { loadManifest, createDriveDevice } from '../../packages/device-abstraction/src/index.js';
+    import { LocalBus } from '../../packages/bus/src/index.js';
+    import { TeleopNode } from '../../packages/nodes/src/index.js';
+
+    const DRIVE_CMD_TOPIC = 'rover-01/drive/cmd_vel';
+    const MANIFEST_URL = '/manifests/rover.manifest.json';
+    const WS_URL = 'ws://127.0.0.1:8765';
+    const GAP_WARN_MS = 150;
 
     const statusEl = document.getElementById('status');
+    const gamepadStatusEl = document.getElementById('gamepadStatus');
     const logEl = document.getElementById('log');
     const connectBtn = document.getElementById('connectBtn');
     const hbSentCountEl = document.getElementById('hbSentCount');
     const hbAckCountEl = document.getElementById('hbAckCount');
     const hbGapEl = document.getElementById('hbGap');
+    const cmdLeftEl = document.getElementById('cmdLeft');
+    const cmdRightEl = document.getElementById('cmdRight');
 
     function log(msg) {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -56,42 +69,37 @@
       console.log(line);
     }
 
-    function heartbeatFrame(seq) {
-      const payload = new Uint8Array(2);
-      new DataView(payload.buffer).setUint16(0, seq, true);
-      return encodeFrame(CMD.HEARTBEAT, payload);
-    }
-
-    function velocityFrame(left, right) {
-      const payload = new Uint8Array(8);
-      const dv = new DataView(payload.buffer);
-      dv.setFloat32(0, left, true);
-      dv.setFloat32(4, right, true);
-      return encodeFrame(CMD.SET_VELOCITY, payload);
-    }
+    window.addEventListener('gamepadconnected', (e) => {
+      gamepadStatusEl.textContent = `${e.gamepad.id} (index ${e.gamepad.index})`;
+      gamepadStatusEl.className = 'connected';
+      log(`gamepad connected: ${e.gamepad.id}`);
+    });
+    window.addEventListener('gamepaddisconnected', () => {
+      gamepadStatusEl.textContent = 'none connected';
+      gamepadStatusEl.className = 'disconnected';
+      log('gamepad disconnected');
+    });
 
     let transport = null;
-    let heartbeatTimer = null;
-    let seq = 0;
+    let heartbeat = null;
+    let bus = null;
+    let teleop = null;
     let sentCount = 0;
     let ackCount = 0;
-    let lastSendAt = null;
-
-    // Anything above ~150ms between sends means the 100ms setInterval is
-    // being throttled or stalled — log it loudly instead of silently
-    // hoping the next tick catches up. This is what would have shown a
-    // heartbeat gap in real time instead of only finding out from the
-    // firmware sim's ESTOP log after the fact.
-    const GAP_WARN_MS = 150;
 
     connectBtn.addEventListener('click', async () => {
       if (transport) return log('already connected — ignoring extra Connect click');
       connectBtn.disabled = true;
 
-      const port = 8765;
-      transport = new WebSocketTransport(`ws://127.0.0.1:${port}`);
+      log(`loading manifest from ${MANIFEST_URL} ...`);
+      const manifest = await loadManifest(MANIFEST_URL);
+      log(`manifest loaded: robot=${manifest.robot}`);
 
-      transport.onFrame(({ cmd, payload }) => {
+      transport = new WebSocketTransport(WS_URL);
+      const drive = createDriveDevice(transport, manifest);
+      bus = new LocalBus(`ros-chromium/${manifest.robot}`);
+
+      transport.onFrame(({ cmd }) => {
         if (cmd === CMD.HEARTBEAT) {
           ackCount++;
           hbAckCountEl.textContent = String(ackCount);
@@ -100,13 +108,15 @@
       transport.onDisconnect(() => {
         statusEl.textContent = 'disconnected';
         statusEl.className = 'disconnected';
-        clearInterval(heartbeatTimer);
+        heartbeat?.stop();
+        teleop?.stop();
+        bus?.close();
         transport = null;
         connectBtn.disabled = false;
         log('disconnected from firmware sim');
       });
 
-      log(`connecting to ws://127.0.0.1:${port} ...`);
+      log(`connecting to ${WS_URL} ...`);
       try {
         await transport.connect();
       } catch (err) {
@@ -117,36 +127,43 @@
       }
       statusEl.textContent = 'connected';
       statusEl.className = 'connected';
-      log('connected — sending heartbeats every 100ms');
-      lastSendAt = performance.now();
+      log('connected');
 
-      heartbeatTimer = setInterval(async () => {
-        const now = performance.now();
-        const gap = lastSendAt === null ? 0 : now - lastSendAt;
-        lastSendAt = now;
-        hbGapEl.textContent = `${gap.toFixed(0)}ms`;
-        if (gap > GAP_WARN_MS) log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — timer was throttled or blocked`);
-
+      // Every drive command — gamepad or manual — flows through this one
+      // subscription. There's exactly one place that calls drive.setVelocity.
+      bus.subscribe(DRIVE_CMD_TOPIC, async ({ left, right }) => {
+        cmdLeftEl.textContent = left.toFixed(2);
+        cmdRightEl.textContent = right.toFixed(2);
         try {
-          await transport.send(heartbeatFrame(seq++));
+          await drive.setVelocity(left, right);
+        } catch (err) {
+          log(`setVelocity failed: ${err.message || err}`);
+        }
+      });
+
+      teleop = new TeleopNode(bus, { topic: DRIVE_CMD_TOPIC });
+      teleop.start();
+
+      heartbeat = startHeartbeat(transport, {
+        gapWarnMs: GAP_WARN_MS,
+        onGap: (gap) => {
+          hbGapEl.textContent = `${gap.toFixed(0)}ms`;
+          log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — timer was throttled or blocked`);
+        },
+        onSend: () => {
           sentCount++;
           hbSentCountEl.textContent = String(sentCount);
-        } catch (err) {
-          log(`heartbeat send failed: ${err.message || err}`);
-        }
-      }, 100);
+        },
+        onSendError: (err) => log(`heartbeat send failed: ${err.message || err}`),
+      });
     });
 
-    document.getElementById('sendVelocity').addEventListener('click', async () => {
-      if (!transport) return log('not connected');
+    document.getElementById('sendVelocity').addEventListener('click', () => {
+      if (!bus) return log('not connected');
       const left = Number(document.getElementById('left').value);
       const right = Number(document.getElementById('right').value);
-      try {
-        await transport.send(velocityFrame(left, right));
-        log(`sent SET_VELOCITY left=${left} right=${right}`);
-      } catch (err) {
-        log(`SET_VELOCITY send failed: ${err.message || err}`);
-      }
+      bus.publish(DRIVE_CMD_TOPIC, { left, right });
+      log(`manual publish left=${left} right=${right}`);
     });
   </script>
 </body>

@@ -3,5 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "TODO (plan.md Phase 3) — local pub/sub over BroadcastChannel, with a SharedWorker owning the actual hardware connection so multiple tabs don't fight over it."
+  "description": "LocalBus: topic-namespaced pub/sub over BroadcastChannel. The SharedWorker that owns the hardware connection across tabs is still TODO (plan.md Phase 4).",
+  "main": "src/index.js"
 }

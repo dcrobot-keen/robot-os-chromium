@@ -15,53 +15,35 @@
 // log, which should show a watchdog ESTOP ~300ms after the last heartbeat,
 // logged after this process has already exited.
 
-import { WebSocketTransport } from '../packages/transport/src/websocket-transport.js';
-import { encodeFrame } from '../packages/transport/src/frame.js';
-import { CMD } from '../packages/transport/src/commands.js';
+import { WebSocketTransport, startHeartbeat } from '../packages/transport/src/index.js';
+import { createDriveDevice } from '../packages/device-abstraction/src/drive-device.js';
 
 const PORT = Number(process.env.SIM_PORT || 8765);
+const manifest = { drive: { setVelocity: 'SET_VELOCITY', velocity: 'GET_ENCODER' } };
 
 function log(msg) {
   console.log(`[client ${new Date().toISOString()}] ${msg}`);
 }
 
-function heartbeatFrame(seq) {
-  const payload = new Uint8Array(2);
-  new DataView(payload.buffer).setUint16(0, seq, true);
-  return encodeFrame(CMD.HEARTBEAT, payload);
-}
-
-function velocityFrame(left, right) {
-  const payload = new Uint8Array(8);
-  const dv = new DataView(payload.buffer);
-  dv.setFloat32(0, left, true);
-  dv.setFloat32(4, right, true);
-  return encodeFrame(CMD.SET_VELOCITY, payload);
-}
-
 const transport = new WebSocketTransport(`ws://127.0.0.1:${PORT}`);
-
-transport.onFrame(({ cmd, payload }) => {
-  if (cmd === CMD.HEARTBEAT) {
-    const seq = new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint16(0, true);
-    log(`heartbeat ack seq=${seq}`);
-  }
-});
+const drive = createDriveDevice(transport, manifest);
 
 await transport.connect();
 log(`connected to firmware sim on port ${PORT}`);
 
-let seq = 0;
-const heartbeatTimer = setInterval(() => transport.send(heartbeatFrame(seq++)), 100);
+const heartbeat = startHeartbeat(transport, {
+  onGap: (gap) => log(`heartbeat send gap ${gap.toFixed(0)}ms`),
+  onSendError: (err) => log(`heartbeat send failed: ${err.message || err}`),
+});
 
-setTimeout(() => {
-  transport.send(velocityFrame(0.5, 0.5));
+setTimeout(async () => {
+  await drive.setVelocity(0.5, 0.5);
   log('sent SET_VELOCITY left=0.5 right=0.5');
 }, 150);
 
 setTimeout(() => {
   log('simulating a crashed tab — exiting without closing the WebSocket, no goodbye');
-  clearInterval(heartbeatTimer);
+  heartbeat.stop();
   log('exiting. check the firmware sim log for the watchdog ESTOP ~300ms from now.');
   process.exit(0); // deliberately not transport._ws.close() — a real crash doesn't get to say goodbye either
 }, 350);
