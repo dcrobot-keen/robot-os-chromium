@@ -1,33 +1,41 @@
-// createDriveDevice — wraps the differential-drive base's SET_VELOCITY
-// command behind the WoT-style action shape used elsewhere in this stack
-// (architecture doc, Layer 03: properties/actions/events instead of raw
-// protocol frames).
+// createDriveDevice — wraps the differential-drive base behind the
+// WoT-style action shape used elsewhere in this stack (architecture doc,
+// Layer 03: properties/actions/events instead of raw protocol commands).
 //
-// Course correction from the original architecture sketch: that doc
-// modeled left and right wheels as two independent "motor" devices, each
-// with its own setVelocity. The actual wire protocol (research.md) sends
-// both wheels' targets in a single SET_VELOCITY frame, so two independent
-// per-wheel actions can't be sent separately without one of them
-// clobbering the other's last-known target. Modeling it as one "drive"
-// action for both wheels is honest to what a differential-drive base
-// actually is: one combined actuator, not two independent ones. See the
-// note in ../../../manifests/rover.manifest.json.
+// The base is a Roboteq controller (former-motor-protocol.md): one !G
+// command carries both channels, so this is modeled as a single "drive"
+// action, not two independent per-wheel ones — honest to what a
+// differential-drive base is. Channels come from the manifest.
 
-import { encodeFrame } from '../../transport/src/frame.js';
-import { CMD } from '../../transport/src/commands.js';
+import { encodeCommand } from '../../transport/src/roboteq.js';
+
+// left/right are normalized [-1, 1] — what TeleopNode and the manual
+// sliders produce. ±1 maps to ±1000 Roboteq units (= ±200 wheel RPM). The
+// eventual real-units path (wheel rad/s → RPM ×60/2π → ÷200×1000) is in
+// former-motor-protocol.md; kept normalized here to match the existing
+// teleop pipeline.
+function toUnits(v) {
+  return Math.max(-1000, Math.min(1000, Math.round(v * 1000)));
+}
 
 export function createDriveDevice(transport, manifest) {
   if (!manifest.drive) throw new Error('manifest has no "drive" entry');
+  const chL = manifest.drive.channels?.left ?? 1;
+  const chR = manifest.drive.channels?.right ?? 2;
 
   return {
-    async setVelocity(leftMps, rightMps) {
-      const payload = new Uint8Array(8);
-      const dv = new DataView(payload.buffer);
-      dv.setFloat32(0, leftMps, true);
-      dv.setFloat32(4, rightMps, true);
-      await transport.send(encodeFrame(CMD.SET_VELOCITY, payload));
+    // Motors come up disabled on the controller (and after any E-STOP or
+    // watchdog trip); enable() releases them. Call it once after connect.
+    async enable() {
+      await transport.send(encodeCommand('!MG'));
     },
-    // velocity readback (manifest's "velocity": "GET_ENCODER") is TODO —
-    // GET_ENCODER isn't implemented by the firmware/simulator yet.
+    async estop() {
+      await transport.send(encodeCommand('!EX'));
+    },
+    async setVelocity(left, right) {
+      await transport.send(encodeCommand(`!G ${chL} ${toUnits(left)}_!G ${chR} ${toUnits(right)}`));
+    },
+    // velocity readback (manifest drive.readback.encoder = "?C") is still
+    // TODO — needs a poll loop deriving wheel speed from ?C count deltas.
   };
 }

@@ -6,29 +6,31 @@
 
 루트에 있는 npm 워크스페이스 정의(`workspaces: ["packages/*", "apps/*"]`). 원래 plan.md엔 pnpm+Turborepo라고 적어뒀었는데 실제로 쓰인 건 plain `npm install`이었어서 문서를 정정했다 — `node_modules/@ros-chromium/*`에 각 패키지로의 심볼릭 링크가 생겨 있다(`.gitignore`로 제외, `package-lock.json`은 커밋). 다만 지금까지 만든 코드는 전부 상대 경로(`../../packages/transport/src/...`)로 서로를 불러오지, `@ros-chromium/transport` 같은 패키지 이름으로 import하는 곳은 아직 없다 — 그래서 이 워크스페이스 링크가 없어도 지금까지의 모든 코드는 동일하게 동작한다.
 
-## packages/transport/src/commands.js
+## packages/transport/src/roboteq.js
 
-펌웨어 레포의 `firmware/sim/src/commands.js`와 바이트 하나 다르지 않게 동일한 파일이다. `HEARTBEAT`(0x01), `SET_VELOCITY`(0x02), `ESTOP`(0x03) 세 개만 실제로 쓰이고, `GET_ENCODER`/`GET_IMU`/`GET_BATTERY`는 번호만 예약되어 있다. 두 레포가 서로의 파일을 참조하지 않기 때문에 일부러 복제해뒀고, 프로토콜이 바뀌면 두 파일을 사람이 직접 맞춰야 한다.
+Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토콜 코덱. 처음 프로토타입이 쓰던 `frame.js`(SOF/LEN/CMD/CRC16 바이너리) + `commands.js`(CMD enum)를 대체한다 — 그 둘은 타겟 로봇이 정해지기 전 placeholder였고 삭제됐다. 프로토콜 전체는 루트의 `former-motor-protocol.md`에 정리돼 있다.
 
-## packages/transport/src/frame.js
+- `encodeCommand(line)` — 끝에 `\r` 없는 명령 문자열을 바이트로.
+- `cmd` — 명령/쿼리 문자열 빌더 모음(`motorGo`/`estop`/`keepAlive`/`motorCommand`/`queryRuntime` 등). 호출부가 프로토콜 문서처럼 읽히게 하는 얇은 템플릿.
+- `RoboteqDecoder` — 스트리밍 라인 디코더. `push(bytes)`마다 `\r` 단위로 잘라 `{type:'ack',ok}`(`+`/`-`), `{type:'reply',key,values,raw}`(`KEY=v:v`), `{type:'line',raw}`(그 외)로 파싱한 배열을 낸다.
 
-이것도 `firmware/sim/src/frame.js`와 동일한 코드다. `SOF|LEN|CMD|PAYLOAD|CRC16|EOF` 프레임을 만드는 `encodeFrame()`과, 바이트가 조각나서 들어와도 완성된 프레임 단위로 복원해주는 `FrameDecoder`가 들어있다. 상세한 동작(재동기화 로직, CRC 알고리즘)은 펌웨어 레포의 `source-explained.md`에 이미 적어뒀고, 여기서는 완전히 같은 내용이라 반복하지 않는다.
+`firmware/sim/src/roboteq.js`와 바이트 단위로 동일해야 한다(의도된 복제 — `former-motor-protocol.md`가 공통 소스). 상세는 펌웨어 레포 `source-explained.md`에도 같은 내용으로 있다.
 
 ## packages/transport/src/websocket-transport.js
 
-`HardwareTransport` 인터페이스의 첫 실제 구현체. 브라우저와 Node.js(22 이상) 양쪽에 다 있는 전역 `WebSocket` 클래스 하나만 써서 만들었기 때문에, 이 파일은 수정 없이 실제 브라우저 탭 안에서도, Node 스크립트 안에서도 똑같이 동작한다 — `apps/dashboard/index.html`과 `scripts/prototype-client.mjs`가 정확히 같은 이 클래스를 가져다 쓴다.
+시뮬레이터 상대 테스트용 `HardwareTransport` 구현체(실제 보드는 같은 모양의 `WebSerialTransport`가 맡을 자리). 전역 `WebSocket`(브라우저 + Node 22+)만 써서 브라우저 탭에서도 Node 스크립트에서도 수정 없이 돈다 — `apps/dashboard/index.html`과 `scripts/prototype-client.mjs`가 같은 클래스를 쓴다.
 
-내부적으로 `FrameDecoder` 인스턴스를 하나 들고 있다가, `onmessage`로 바이너리 메시지(`ArrayBuffer`)가 들어올 때마다 `Uint8Array`로 바꿔서 디코더에 밀어넣고, 완성된 `{cmd, payload}` 프레임이 나오면 등록된 콜백들에 전달한다. WebSocket은 이미 메시지 단위로 배달해주기 때문에 TCP 때처럼 바이트가 쪼개져 오는 걱정은 없지만, 프레임 포맷 자체(CRC 검증 등)는 어차피 나중에 WebSerial(진짜 바이트 스트림)에서도 그대로 써야 하므로 굳이 다른 디코딩 경로를 따로 만들지 않고 `FrameDecoder`를 그대로 재사용했다.
+`RoboteqDecoder` 하나를 들고 있다가, `onmessage`로 바이트가 들어오면 (1) 먼저 raw 바이트 그대로 `onRaw` 콜백들에 넘기고 (2) 디코더에 밀어넣어 나온 파싱 메시지를 `onMessage` 콜백들에 넘긴다. `onRaw`는 파싱하지 않고 바이트만 중계해야 하는 곳(Phase 5 `RtcHostBridge`)을 위한 것이다.
 
-`connect()`는 `WebSocket`을 열고 `onopen`에서 resolve하는 프라미스를 반환하고, `onclose`가 오면 등록된 disconnect 콜백들을 부른다. `send()`는 그냥 `ws.send(frame)`이다. `close()`는 인터페이스의 선택적 부분으로, 정상 종료 핸드셰이크(WS close 프레임)를 보내는 의도적인 종료다 — "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지 자체를 죽여야 하고(`prototype-client.mjs`는 지금도 일부러 안 부른다), Phase 5의 `RtcHostBridge`는 operator 세션 하나를 깔끔히 끝낼 때 이걸 쓴다.
+`connect()`는 `onopen`에서 resolve, `onclose`에서 disconnect 콜백. `send()`는 `ws.send(frame)`. `close()`는 인터페이스의 선택적 부분 — 정상 종료 핸드셰이크를 보내는 의도적 종료다. "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지를 죽여야 하고(`prototype-client.mjs`가 그렇게 한다), `RtcHostBridge`는 operator 세션을 깔끔히 끝낼 때 쓴다.
 
 ## packages/transport/src/heartbeat.js
 
-`startHeartbeat(transport, options)`. 원래는 `prototype-client.mjs`와 `apps/dashboard/index.html`에 거의 똑같은 하트비트 루프가 두 벌 있었는데, 실제 teleop 대시보드가 세 번째 자리가 되는 시점에 그냥 하나로 뽑아냈다. 100ms마다 하트비트 프레임을 보내고, 매 틱마다 직전 전송 이후 얼마나 지났는지(`performance.now()` 차이)를 재서 `gapWarnMs`(기본 150ms)를 넘으면 `onGap` 콜백을 부른다 — 이게 지난번 원인 불명의 23초 하트비트 정지 이후 추가한 진단 로직이다. `onSend`는 전송이 성공할 때마다, `onSendError`는 실패할 때마다 불린다. `stop()`으로 멈춘다.
+`startHeartbeat(transport, options)`. 100ms마다 `!B 3 1`(Roboteq keepalive bool — 레퍼런스 ROS 드라이버가 매 제어 사이클 보내고, 온보드 안전 스크립트도 이걸 본다)을 보낸다. Former의 Roboteq는 시리얼이 ~1초 조용하면 RWD 워치독이 모터를 세우므로, 그 안에서 뭐라도 계속 보내는 게 이 루프의 역할이다. 매 틱마다 직전 전송과의 간격(`performance.now()`)을 재서 `gapWarnMs`(기본 150ms)를 넘으면 `onGap` — 원인 불명의 23초 정지(plan.md "Phase 2 진행") 이후 남긴 진단. `onSend`/`onSendError`, `stop()`.
 
 ## packages/transport/src/index.js
 
-`frame.js`, `commands.js`, `websocket-transport.js`, `heartbeat.js`를 재수출(`export *`)한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스의 모양을 적어뒀고, 지금은 `WebSocketTransport`가 그 모양을 구현한 첫 번째이자 유일한 구현체다. `WebSerialTransport`, `WebUSBTransport` 등은 여전히 TODO로 남아있다 — 실제 보드가 정해지면 `WebSocketTransport`와 똑같은 모양으로 하나 더 추가하면 되고, 그 위의 코드(device-abstraction, nodes, dashboard)는 건드릴 필요가 없는 게 이 인터페이스를 둔 이유다.
+`roboteq.js`, `websocket-transport.js`, `heartbeat.js`를 재수출한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스 모양(`connect`/`send`/`onMessage`/`onDisconnect`, 선택적 `onRaw`/`close`)과 와이어 프로토콜이 Roboteq라는 것, 다음 TODO가 `navigator.serial` 기반 `WebSerialTransport`(`/dev/ttyMOTOR` @ 115200)라는 걸 적어뒀다. 그 위 코드(device-abstraction, nodes, dashboard)는 transport 구현을 갈아끼워도 안 건드리는 게 이 인터페이스를 둔 이유다.
 
 ## packages/bus/src/local-bus.js
 
@@ -40,11 +42,11 @@
 
 Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공유하는 부분. `hardware-bridge-worker.js`는 일반 모듈이 아니라 `new SharedWorker(url, { type: 'module' })`로 로드되는 워커 스크립트 자체다 — 이 스크립트 하나가 오리진 전체에서 단 하나만 실행되고, 탭이 몇 개든 전부 이 하나의 인스턴스에 `MessagePort`로 연결된다.
 
-워커 안에는 진짜 `WebSocketTransport` 인스턴스가 딱 하나만 존재한다. 첫 번째 탭이 `{type:'connect'}`를 보내면 그때 실제로 `transport.connect()`를 호출하고 `startHeartbeat()`도 그때 한 번만 시작한다(`ensureConnected()`가 진행 중인 연결 시도를 프라미스로 캐싱해서 여러 탭이 동시에 연결을 요청해도 실제 연결 시도는 한 번만 일어나게 막는다). 이후 새로 열리는 탭은 이미 연결되어 있으면 그 상태를 바로 돌려받는다. 펌웨어에서 오는 프레임(하트비트 에코 포함)과 연결 상태, 하트비트 진단(간격 경고, 전송 실패)은 전부 `broadcast()`로 연결된 모든 포트에 똑같이 전달된다.
+워커 안에는 진짜 `WebSocketTransport` 인스턴스가 딱 하나만 존재한다. 첫 번째 탭이 `{type:'connect'}`를 보내면 그때 실제로 `transport.connect()`를 호출하고 `startHeartbeat()`도 그때 한 번만 시작한다(`ensureConnected()`가 진행 중인 연결 시도를 프라미스로 캐싱해서 여러 탭이 동시에 연결을 요청해도 실제 연결 시도는 한 번만 일어나게 막는다). 이후 새로 열리는 탭은 이미 연결되어 있으면 그 상태를 바로 돌려받는다. 컨트롤러에서 오는 파싱된 메시지(`{type:'message', msg}`)와 연결 상태, keepalive 진단(간격 경고, 전송 실패)은 전부 `broadcast()`로 연결된 모든 포트에 똑같이 전달된다.
 
-`hardware-bridge-client.js`의 `HardwareBridgeClient`는 탭 쪽에서 이 워커에 붙는 프록시다. 의도적으로 `WebSocketTransport`와 같은 모양(`connect()`, `send()`, `onFrame()`, `onDisconnect()`)을 그대로 구현했다 — `packages/transport`의 `HardwareTransport` 인터페이스를 처음 만들 때 "구현체를 바꿔 끼워도 위 레이어는 안 건드린다"는 게 목적이었는데, 이번이 그 목적이 실제로 쓰인 첫 사례다. `createDriveDevice(transport, manifest)`는 `WebSocketTransport`를 받든 `HardwareBridgeClient`를 받든 코드 한 줄도 안 바뀐다.
+`hardware-bridge-client.js`의 `HardwareBridgeClient`는 탭 쪽에서 이 워커에 붙는 프록시다. 의도적으로 `WebSocketTransport`와 같은 모양(`connect()`, `send()`, `onMessage()`, `onDisconnect()`)을 그대로 구현했다 — `packages/transport`의 `HardwareTransport` 인터페이스를 처음 만들 때 "구현체를 바꿔 끼워도 위 레이어는 안 건드린다"는 게 목적이었는데, 이번이 그 목적이 실제로 쓰인 첫 사례다. `createDriveDevice(transport, manifest)`는 `WebSocketTransport`를 받든 `HardwareBridgeClient`를 받든 코드 한 줄도 안 바뀐다.
 
-한 가지 의도적인 단순화: `send()`는 워커에 메시지를 posting만 하고 바로 resolve되는 fire-and-forget이다. 매 프레임(특히 100ms마다 나가는 하트비트)마다 워커의 응답을 기다리는 왕복을 만들지 않기 위한 선택이고, 대신 전송이 실패하면 `onSendError` 콜백으로 비동기 통지된다 — 실패가 어느 `send()` 호출 때문이었는지 정확히 짚어주지는 못한다.
+한 가지 의도적인 단순화: `send()`는 워커에 메시지를 posting만 하고 바로 resolve되는 fire-and-forget이다. 매 명령(특히 100ms마다 나가는 keepalive)마다 워커의 응답을 기다리는 왕복을 만들지 않기 위한 선택이고, 대신 전송이 실패하면 `onSendError` 콜백으로 비동기 통지된다.
 
 이 두 파일은 `SharedWorker`, `self.onconnect` 같은 브라우저 전용 API에 의존해서 Node에서는 실행할 수 없다(Node에 `SharedWorker`가 없다). `node --check`로 문법만 확인했고, 실제 동작(탭 두 개를 열었을 때 펌웨어 로그에 `connection opened`가 한 번만 찍히는지, 탭을 하나씩 닫아도 나머지 탭은 멀쩡한지, 모든 탭이 닫히고 나서야 워치독이 독자적으로 정지시키는지)은 이 스택에서 처음으로 사람이 실제 브라우저로 직접 검증해야 하는 부분이다.
 
@@ -52,7 +54,7 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 `loadManifest(url)`은 `fetch()`로 매니페스트 JSON을 받아오는 것뿐이다. 스키마 검증은 없고, fetch 자체가 실패하면 에러를 던진다. 브라우저 전용이라(HTTP fetch를 가정) Node에서 직접 쓸 일은 없다.
 
-`createDriveDevice(transport, manifest)`가 이번 단계에서 아키텍처 문서의 원래 설계를 실제로 고친 지점이다. 처음 설계 문서에서는 `motors.left`/`motors.right`를 각각 독립적인 액션으로 그렸는데, 실제 와이어 프로토콜의 `SET_VELOCITY`는 좌우 바퀴 목표값을 **한 프레임에 같이** 담는다(`research.md` 참고). 그래서 "왼쪽 바퀴"와 "오른쪽 바퀴"를 독립된 액션으로 두면 하나를 호출할 때 다른 쪽 목표값을 모르는 문제가 생긴다. 구현 단계에서 이걸 발견하고 매니페스트와 코드를 둘 다 "drive"라는 단일 액션으로 고쳤다 — 디퍼렌셜 드라이브 로봇은 애초에 물리적으로 좌우 바퀴가 하나의 명령으로 같이 움직이는 게 맞으므로, 오히려 원래 아키텍처보다 실제 하드웨어를 더 정직하게 반영한다. `setVelocity(leftMps, rightMps)` 하나가 `SET_VELOCITY` 프레임 하나를 만들어 `transport.send()`한다. 속도 리드백(`velocity: "GET_ENCODER"`)은 펌웨어/시뮬레이터 양쪽 다 아직 안 만들어서 여기도 TODO다.
+`createDriveDevice(transport, manifest)`는 좌우 바퀴를 단일 "drive" 액션으로 모델링한다 — Roboteq `!G`가 한 명령에 두 채널을 같이 싣고, 디퍼렌셜 드라이브는 애초에 좌우가 하나의 명령으로 움직이는 게 물리적으로 맞다. 세 가지를 노출한다: `enable()`(`!MG` — 모터는 연결/ESTOP/워치독 이후 항상 비활성으로 시작하므로 연결 후 한 번 불러야 함), `estop()`(`!EX`), `setVelocity(left, right)`. `left`/`right`는 정규화된 [-1, 1](TeleopNode와 수동 슬라이더가 내는 값)이고, `±1`을 `±1000` Roboteq 단위(= ±200 바퀴 RPM)로 매핑해 `!G <chL> n_!G <chR> n`을 만들어 보낸다. 채널 번호는 매니페스트의 `drive.channels`에서 온다. 실제 단위(바퀴 rad/s → RPM ×60/2π → ÷200×1000)로 가는 경로는 `former-motor-protocol.md`에 있고, 기존 teleop 파이프라인과 맞추려고 지금은 정규화 값을 그대로 쓴다. 속도 리드백(`drive.readback.encoder = "?C"`)은 `?C` 카운트 델타로 바퀴 속도를 뽑는 폴 루프가 아직 없어서 TODO.
 
 ## packages/nodes/src/teleop-node.js
 
@@ -74,15 +76,15 @@ WebRTC 시그널링만 하는 최소 WebSocket 서버. robot id 하나가 "방" 
 
 ## packages/rtc/src/rtc-transport.js
 
-원격 세션의 operator 쪽. `WebSocketTransport`와 똑같은 `connect`/`send`/`onFrame`/`onDisconnect` 모양을 구현해서, 대시보드가 원격 로봇을 로컬 로봇과 같은 코드로 몬다 — transport 생성자만 바뀐다(`HardwareBridgeClient`가 Phase 4에서 한 것과 같은 수법, 한 홉 더 밖). operator가 능동적인 쪽이라 `RTCPeerConnection`과 데이터채널을 만들고 offer를 보낸다(host는 answer만; 역할이 고정이라 perfect-negotiation 안 함). host가 이미 방에 있으면 바로 offer하고, 없으면 `peer-joined`를 기다린다. 들어오는 데이터채널 메시지는 `FrameDecoder`를 거쳐 `{cmd,payload}`로 나온다(`WebSocketTransport`와 같은 디코딩 경로 재사용).
+원격 세션의 operator 쪽. `WebSocketTransport`와 똑같은 `connect`/`send`/`onMessage`/`onDisconnect` 모양을 구현해서, 대시보드가 원격 로봇을 로컬 로봇과 같은 코드로 몬다 — transport 생성자만 바뀐다(`HardwareBridgeClient`가 Phase 4에서 한 것과 같은 수법, 한 홉 더 밖). operator가 능동적인 쪽이라 `RTCPeerConnection`과 데이터채널을 만들고 offer를 보낸다(host는 answer만; 역할이 고정이라 perfect-negotiation 안 함). host가 이미 방에 있으면 바로 offer하고, 없으면 `peer-joined`를 기다린다. 들어오는 데이터채널 메시지는 `RoboteqDecoder`를 거쳐 파싱된 메시지로 나온다(`WebSocketTransport`와 같은 디코딩 경로 재사용).
 
-이 transport는 **자체 하트비트가 없다**. operator 대시보드가 `startHeartbeat(rtcTransport)`를 직접 돈다 — 하트비트가 operator 자신의 링크를 타야, operator가 얼거나 끊겼을 때 펌웨어 워치독이 ~300ms 뒤 모터를 0으로 만든다. host가 대신 하트비트를 보내면 이 보장이 깨진다. ICE 서버는 지금 공용 STUN 하나뿐이고, 크로스-NAT용 TURN과 LAN WebSocket 릴레이 폴백은 아직 미결(`plan.md` "아직 정하지 않은 것").
+이 transport는 **자체 keepalive가 없다**. operator 대시보드가 `startHeartbeat(rtcTransport)`를 직접 돈다 — keepalive(`!B 3 1`)가 operator 자신의 링크를 타야, operator가 얼거나 끊겼을 때 Roboteq RWD 워치독이 ~1초 뒤 모터를 0으로 만든다. host가 대신 보내면 이 보장이 깨진다. ICE 서버는 지금 공용 STUN 하나뿐이고, 크로스-NAT용 TURN과 LAN WebSocket 릴레이 폴백은 아직 미결(`plan.md` "아직 정하지 않은 것").
 
 ## packages/rtc/src/rtc-host-bridge.js
 
-원격 세션의 host 쪽. 펌웨어에 닿을 수 있는 머신(여기서는 시뮬레이터에 닿는 머신)에서 돈다. 방에 나타나는 operator마다 WebRTC offer에 answer하고, 그 operator의 데이터채널과 펌웨어로 향하는 WebSocket 사이를 거의 그대로 지나가는 바이트 파이프가 된다 — operator→펌웨어는 raw 바이트 그대로(펌웨어의 `FrameDecoder`가 유효성 판정의 authority), 펌웨어→operator는 `{cmd,payload}`를 `encodeFrame`으로 다시 싸서 보낸다. **하트비트를 절대 안 보내고**, ESTOP도 명령 검사도 안 한다.
+원격 세션의 host 쪽. 펌웨어에 닿을 수 있는 머신(여기서는 시뮬레이터에 닿는 머신)에서 돈다. 방에 나타나는 operator마다 WebRTC offer에 answer하고, 그 operator의 데이터채널과 펌웨어로 향하는 WebSocket 사이를 **양방향 모두 raw 바이트 그대로** 지나가는 파이프가 된다 — `transport.onRaw`를 쓰지 파싱된 `onMessage`를 안 쓴다. **keepalive를 절대 안 보내고**, ESTOP도 트래픽 파싱도 안 한다. 유효성 판정은 펌웨어의 디코더가 authority.
 
-operator 세션 하나당 펌웨어 WebSocket을 새로 연다. 시뮬레이터는 새 연결이 들어올 때만 estop 상태에서 재무장하기 때문에(하트비트만으로는 안 됨), "operator 연결됨" ↔ "펌웨어 소켓 열림"을 1:1로 묶어야 연결→주행→해제→재연결이 올바르게 돈다. operator가 떠나면 그 세션의 펌웨어 소켓을 `close()`로 깔끔히 닫는다. 실제 로봇 host가 이렇게 가야 하는지는 미결 항목.
+operator 세션 하나당 펌웨어 WebSocket을 새로 연다. 펌웨어는 새 연결이 들어올 때(또는 operator가 보낸 `!MG`)만 정지 상태에서 재무장하기 때문에, "operator 연결됨" ↔ "펌웨어 소켓 열림"을 1:1로 묶어야 연결→주행→해제→재연결이 올바르게 돈다. operator가 떠나면 그 세션의 펌웨어 소켓을 `close()`로 깔끔히 닫는다. 실제 로봇 host가 이렇게 가야 하는지는 미결 항목.
 
 `RTCPeerConnection` 의존이라 Node에서는 못 돌린다 — `node --check`만 했고 실제 동작은 사람이 브라우저로 검증(`plan.md` Phase 5 "사람이 확인해줘야 하는 것").
 
@@ -92,24 +94,27 @@ operator 세션 하나당 펌웨어 WebSocket을 새로 연다. 시뮬레이터�
 
 ## apps/dashboard/host.html
 
-host 브리지 콘솔. 조작 UI가 없다 — 시그널링/펌웨어/robot id 입력 필드, Start bridge 버튼, 연결된 operator 목록(각 행에 펌웨어 링크 상태와 양방향 바이트 카운트), 이벤트 로그가 전부다. `SignalingClient({role:'host'})` + `RtcHostBridge`를 만들어 `start()`할 뿐이고, 실제 중계 로직은 전부 `RtcHostBridge` 안에 있다. 페이지 상단에 "이 페이지는 로봇을 몰지 않고 하트비트도 안 보낸다"를 명시해뒀다.
+host 브리지 콘솔. 조작 UI가 없다 — 시그널링/펌웨어/robot id 입력 필드, Start bridge 버튼, 연결된 operator 목록(각 행에 펌웨어 링크 상태와 양방향 바이트 카운트), 이벤트 로그가 전부다. `SignalingClient({role:'host'})` + `RtcHostBridge`를 만들어 `start()`할 뿐이고, 실제 중계 로직은 전부 `RtcHostBridge` 안에 있다. 페이지 상단에 "이 페이지는 로봇을 몰지 않고 keepalive도 안 보낸다"를 명시해뒀다.
 
-## manifests/rover.manifest.json
+## manifests/former.manifest.json
 
-레퍼런스 로버 하나를 기술하는 매니페스트. 처음 버전은 `motors.left`/`motors.right`를 독립 액션으로 뒀는데, 위 `drive-device.js` 설명에 적은 이유로 `drive.setVelocity`/`drive.velocity` 하나로 합쳤다. `velocity`(`GET_ENCODER` 리드백)는 아직 펌웨어/시뮬레이터에 구현이 없어서 매핑만 있고 실제로 쓰이진 않는다.
+Former 2.0을 기술하는 매니페스트. `base: "roboteq"`, `transport`(kind/baud/device), `drive`(채널 매핑 `{left:1, right:2}`, `maxWheelRpm`, `countsPerRev`, 바퀴 반지름/축거, 그리고 `readback`에 `?C`/`?V 2`/`?A`/`?T 1`/`?FF`/`?DI` 쿼리 매핑). `drive.channels`만 `createDriveDevice`가 실제로 읽고, 나머지는 아직 문서/향후 용도. 이전 이름은 `rover.manifest.json`(가상의 rover-01)이었다.
 
 ## scripts/prototype-client.mjs
 
-`WebSocketTransport`와 `startHeartbeat`, `createDriveDevice`를 실제로 가져다 쓰는 Node.js 클라이언트. 처음엔 `net` 소켓을 직접 다뤘다가 `WebSocketTransport`로, 이번엔 하트비트 루프와 속도 명령까지 각각 `startHeartbeat`/`createDriveDevice`로 옮겨서 이 레포가 만든 추상화를 실제로 그대로 사용하도록(dogfooding) 계속 바꿔왔다.
+`WebSocketTransport` + `startHeartbeat` + `createDriveDevice`를 실제로 가져다 쓰는(dogfooding) Node.js 클라이언트. 브라우저 탭 하나가 하는 걸 그대로 한다.
 
-동작 순서는 다음과 같다.
+1. `WebSocketTransport`로 시뮬레이터에 연결.
+2. `?FID` 한 번 보내 컨트롤러 응답 로그, `drive.enable()`(`!MG`).
+3. `startHeartbeat`로 100ms 간격 `!B 3 1` keepalive 시작.
+4. 연결 150ms 시점에 `drive.setVelocity(0.5, 0.5)` → `!G 1 500_!G 2 500`.
+5. 연결 350ms 시점에 `heartbeat.stop()` 후 `transport.close()`를 **부르지 않고** `process.exit(0)` — 크래시 흉내.
 
-1. `WebSocketTransport`로 펌웨어(시뮬레이터)에 연결한다.
-2. `startHeartbeat`로 100ms 간격 하트비트 전송을 시작한다.
-3. 연결 150ms 시점에 `createDriveDevice(transport, manifest).setVelocity(0.5, 0.5)`를 한 번 호출한다.
-4. 연결 350ms 시점에 `heartbeat.stop()`을 부르고, `transport._ws.close()`를 부르지 않은 채로 `process.exit(0)`을 호출해 프로세스를 그대로 죽인다.
+`close()`를 일부러 안 부르는 게 핵심이다. 정상 종료는 핸드셰이크가 있지만 크래시는 그럴 겨를이 없다. 이 스크립트는 정지를 스스로 확인하지 않는다(프로세스가 죽어버리니까) — 시뮬레이터 로그에서 이 프로세스가 죽고 `SIM_RWD_MS`(기본 1초) 뒤 찍히는 `motors zeroed — RWD: ...`로 확인한다. 빠르게 보려면 시뮬레이터를 `SIM_RWD_MS=300`으로 띄운다.
 
-`close()`를 일부러 부르지 않는 게 핵심이다. WebSocket의 정상 종료는 양쪽이 종료 프레임을 주고받는 핸드셰이크인데, 실제 탭 크래시는 그런 인사를 할 겨를이 없다. 그래서 프로세스를 그냥 죽여서 OS가 강제로 소켓을 정리하게 만드는 쪽이 "크래시"를 더 정직하게 흉내낸다. 이 스크립트는 ESTOP이 실제로 발동했는지 스스로 확인하지 않는데, 4번 단계에서 프로세스가 완전히 죽어버리기 때문에 애초에 확인할 방법이 없고, 그게 이 테스트의 요점이다 — 정지가 실제로 일어났는지는 펌웨어(시뮬레이터) 쪽 로그에서, 이 프로세스가 죽고 한참 뒤의 타임스탬프로 확인해야 한다. 자세한 실행 결과와 재현 절차는 `plan.md`의 "Phase 1 검증 기록" 절에 남겨뒀다.
+## scripts/roboteq-smoke.mjs
+
+Roboteq 라인 프로토콜 전 구간을 브라우저 없이 검증하는 스모크 테스트 — `WebSocketTransport` + `roboteq.js` 코덱 + 시뮬레이터의 Roboteq 에뮬레이터 + `createDriveDevice`, 그리고 load-bearing한 RWD 워치독. 자체적으로 시뮬레이터를 짧은 `SIM_RWD_MS`로 자식 프로세스로 띄우고 7개 체크(`?FID` 응답, `!MG` 전엔 `!G` 무시, `!MG` 후 엔코더 증가, `+` ack, `!EX` 후 `FF=16`/`DI=0` 래치, 침묵 시 RWD 정지)를 돌린 뒤 PASS/FAIL, 실패 시 non-zero 종료. `node scripts/roboteq-smoke.mjs`.
 
 ## scripts/signaling-smoke.mjs
 
@@ -123,13 +128,13 @@ Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/
 
 Phase 1~2에서는 연결성 테스트용 최소 페이지였는데, 이번 Phase 3에서 실제 게임패드 teleop 대시보드로 바뀌었다. 연결 흐름과 하트비트 진단 로직(중복 Connect 가드, 전송 간격 경고, 전송 실패 로그)은 이전 버전에서 그대로 가져왔고, `startHeartbeat` 헬퍼로 옮겨서 코드는 오히려 줄었다.
 
-Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/rover.manifest.json`을 받아오고 → `WebSocketTransport`를 열고 → `createDriveDevice(transport, manifest)`로 주행 디바이스를 만들고 → `LocalBus`를 하나 만들어서 `rover-01/drive/cmd_vel` 토픽을 구독해 들어오는 `{left, right}`를 그대로 `drive.setVelocity()`에 넘기고 → `TeleopNode`를 그 버스에 붙여 시작하고 → `startHeartbeat`를 시작한다. 화면의 수동 슬라이더도 같은 토픽에 `publish`하는 것 말고는 하지 않는다 — 즉 게임패드든 수동 조작이든 마지막에 `drive.setVelocity()`를 호출하는 코드는 딱 한 군데(버스 구독 콜백)뿐이다. 페이지 상단에 이 구조를 그대로 설명해뒀다.
+Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/former.manifest.json`을 받아오고 → transport를 열고 → `createDriveDevice(transport, manifest)`로 주행 디바이스를 만들고 → 연결 후 `drive.enable()`(`!MG`)로 모터를 활성화하고 → `LocalBus`를 하나 만들어서 `former-01/drive/cmd_vel` 토픽을 구독해 들어오는 `{left, right}`를 그대로 `drive.setVelocity()`에 넘기고 → `TeleopNode`를 그 버스에 붙여 시작한다. 화면의 수동 슬라이더도 같은 토픽에 `publish`하는 것 말고는 하지 않는다 — 즉 게임패드든 수동 조작이든 마지막에 `drive.setVelocity()`를 호출하는 코드는 딱 한 군데(버스 구독 콜백)뿐이다.
 
 Phase 4에서는 `WebSocketTransport`를 직접 여는 대신 `HardwareBridgeClient`를 연다는 점만 바뀌었다. `createDriveDevice`는 두 경우 모두 같은 방식으로 호출되므로(둘 다 `HardwareTransport` 모양을 구현하기 때문에) 이 위의 배선 설명은 그대로 유효하다. 달라진 건 하트비트 관련 UI 갱신 방식이다 — 이전엔 이 탭이 직접 `startHeartbeat`를 불렀지만, 지금은 그 호출 자체가 워커 안으로 옮겨갔기 때문에 이 탭은 `transport.onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`로 워커가 보내주는 소식을 받아 화면 숫자만 갱신한다.
 
 게임패드 연결 상태는 `window`의 `gamepadconnected`/`gamepaddisconnected` 이벤트로 표시한다 — 참고로 Gamepad API 스펙상 실제로 게임패드의 버튼이나 스틱을 한 번 조작해야 브라우저가 그 게임패드를 "연결됨"으로 인식하는 브라우저가 많다(연결만 해두고 가만히 있으면 안 뜰 수 있음).
 
-Phase 5에서 모드 선택(`local` / `operator`)이 추가됐다. `local`은 지금까지대로 `HardwareBridgeClient`(SharedWorker)를 쓰고, `operator`는 `SignalingClient` + `RtcTransport`를 써서 원격 host 브리지에 WebRTC로 붙는다. transport 위쪽 배선(`createDriveDevice`, `LocalBus`, `TeleopNode`, 버스 구독)은 두 모드가 완전히 동일하고, 갈리는 건 하트비트뿐이다 — `local`은 워커가 하트비트를 소유하므로 이 탭은 `onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`를 듣기만 하고, `operator`는 `RtcTransport`에 하트비트가 없으므로 이 탭이 (Phase 4 이전처럼) `startHeartbeat`를 직접 돈다. 이게 load-bearing한 선택인 이유는 `plan.md` Phase 5 "하트비트는 operator가 소유한다" 절에 적어뒀다. `teardown()`은 두 모드 공통 정리(하트비트·teleop·bus 정지, transport null)를 한군데로 모은 것이다.
+Phase 5에서 모드 선택(`local` / `operator`)이 추가됐다. `local`은 지금까지대로 `HardwareBridgeClient`(SharedWorker)를 쓰고, `operator`는 `SignalingClient` + `RtcTransport`를 써서 원격 host 브리지에 WebRTC로 붙는다. transport 위쪽 배선(`createDriveDevice`, `drive.enable()`, `LocalBus`, `TeleopNode`, 버스 구독)은 두 모드가 완전히 동일하고, 갈리는 건 keepalive뿐이다 — `local`은 워커가 keepalive를 소유하므로 이 탭은 `onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`를 듣기만 하고, `operator`는 `RtcTransport`에 keepalive가 없으므로 이 탭이 (Phase 4 이전처럼) `startHeartbeat`를 직접 돈다. 이게 load-bearing한 선택인 이유는 `plan.md` Phase 5 "하트비트는 operator가 소유한다" 절에 적어뒀다. 컨트롤러가 각 명령에 보내는 `+` ack는 `transport.onMessage`에서 세어 "acked" 카운터로 쓴다(keepalive가 100ms마다 하나씩 `+`를 받으므로 왕복 liveness 지표). `teardown()`은 두 모드 공통 정리(keepalive·teleop·bus 정지, transport null)를 한군데로 모은 것이다.
 
 이 페이지가 존재하는 이유는 단 하나, 지금까지의 모든 검증이 Node.js끼리의 통신이었고 실제 브라우저 탭은 이 흐름에 한 번도 들어온 적이 없었기 때문이다. `scripts/serve-dashboard.mjs`로 서빙한 뒤 `http://localhost:5173/apps/dashboard/index.html`로 열어야 한다.
 

@@ -1,5 +1,5 @@
 // HardwareBridgeClient — the tab-side proxy for hardware-bridge-worker.js.
-// Implements the same connect()/send()/onFrame()/onDisconnect() shape as
+// Implements the same connect()/send()/onMessage()/onDisconnect() shape as
 // HardwareTransport (see packages/transport/src/index.js), so
 // createDriveDevice() and anything else built against that interface works
 // unmodified whether it's handed a real WebSocketTransport or one of
@@ -18,7 +18,7 @@ export class HardwareBridgeClient {
     this._connectResolve = null;
     this._connectReject = null;
 
-    this._frameHandlers = [];
+    this._messageHandlers = [];
     this._disconnectHandlers = [];
     this._heartbeatSentHandlers = [];
     this._heartbeatGapHandlers = [];
@@ -43,8 +43,8 @@ export class HardwareBridgeClient {
         this._connectReject?.(new Error(msg.message));
         this._connectResolve = this._connectReject = null;
         break;
-      case 'frame':
-        for (const cb of this._frameHandlers) cb({ cmd: msg.cmd, payload: msg.payload });
+      case 'message':
+        for (const cb of this._messageHandlers) cb(msg.msg);
         break;
       case 'heartbeat-sent':
         for (const cb of this._heartbeatSentHandlers) cb();
@@ -79,8 +79,8 @@ export class HardwareBridgeClient {
     this._port.postMessage({ type: 'send', frame });
   }
 
-  onFrame(cb) {
-    this._frameHandlers.push(cb);
+  onMessage(cb) {
+    this._messageHandlers.push(cb);
   }
 
   onDisconnect(cb) {

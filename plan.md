@@ -300,6 +300,24 @@ candidate, RTT ~0). 실제 두 번째 머신이 붙는 시점에 다시 확인�
   이것이다. 우리 heartbeat(100ms 주기)는 이 1000ms 안에서 뭔가를 계속 보내기만 하면
   된다. E-STOP = `!EX`. (실기에서 `~RWD`가 0이 아닌지 확인 필요 —
   `../former-motor-protocol.md` 참고.)
+
+### 코드 반영 완료
+
+`packages/transport/src/{frame,commands}.js`(바이너리 프레임)를 삭제하고
+`roboteq.js`(코덱: `encodeCommand` + `cmd` 빌더 + `RoboteqDecoder`)를 넣었다.
+`WebSocketTransport`는 `onMessage`(파싱된 응답) + `onRaw`(중계용 미가공 바이트)로
+바뀌었고, `startHeartbeat`는 `!B 3 1`을 보낸다. `createDriveDevice`는 `enable()`
+(`!MG`) / `estop()`(`!EX`) / `setVelocity(l, r)`(정규화 ±1 → `!G ±1000`)을 노출한다.
+`HardwareTransport` 인터페이스 위쪽(`bus`, `nodes`, `rtc`, 대시보드 배선)은
+`onFrame`→`onMessage` 이름만 따라 바뀌고 로직은 그대로 — 프로토콜 전면 교체가
+인터페이스 경계 안에서 끝났다(이 구조를 둔 목적의 첫 실전 시험, 통과).
+
+매니페스트는 `manifests/former.manifest.json`(robot `former-01`), 대시보드/호스트
+페이지도 그에 맞춰 갱신. `RtcHostBridge`는 이제 `onRaw`로 양방향 미가공 중계만
+한다. 브라우저 없이 도는 검증: `scripts/roboteq-smoke.mjs`(7/7),
+`scripts/signaling-smoke.mjs`(8/8), `prototype-client.mjs` 크래시 회귀 모두 통과.
+WebRTC 실동작은 여전히 사람이 브라우저로 확인해야 한다(Phase 5 절 "사람이
+확인해줘야 하는 것", robot id만 `former-01`로).
 - **`GET_ENCODER` 리드백**(지금 매니페스트에 매핑만 있고 미구현)은 Former가 실제로
   주는 엔코더/오도메트리 데이터로 채운다.
 - LIDAR(SICK TiM571, Ethernet/CoLa)와 RealSense D435(USB/UVC)는 브라우저로 붙이기

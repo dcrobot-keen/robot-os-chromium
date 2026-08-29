@@ -1,5 +1,5 @@
 // RtcTransport — the operator side of a remote session. Implements the same
-// connect()/send()/onFrame()/onDisconnect() shape as WebSocketTransport
+// connect()/send()/onMessage()/onDisconnect() shape as WebSocketTransport
 // (see packages/transport/src/index.js), so the dashboard drives a robot on
 // another machine with exactly the code it uses to drive one plugged into
 // this machine — only the transport constructor changes. Same trick as
@@ -11,12 +11,13 @@
 // dance here.
 //
 // The heartbeat rides this transport. That is deliberate: if the operator's
-// machine freezes or its network drops, heartbeats stop arriving at the
-// host, the host forwards nothing, and the firmware watchdog zeroes the
-// motors ~300ms later — the same guarantee as a yanked USB cable, now
-// across a WebRTC link. The host never heartbeats on the operator's behalf.
+// machine freezes or its network drops, the "!B 3 1" keepalive stops
+// arriving at the host, the host forwards nothing, and the Roboteq serial
+// watchdog zeroes the motors ~1s later — the same guarantee as a yanked
+// cable, now across a WebRTC link. The host never keepalives on the
+// operator's behalf.
 
-import { FrameDecoder } from '../../transport/src/frame.js';
+import { RoboteqDecoder } from '../../transport/src/roboteq.js';
 
 const DEFAULT_RTC_CONFIG = {
   // A public STUN server covers same-LAN / simple-NAT cases. Cross-NAT
@@ -32,8 +33,8 @@ export class RtcTransport {
     this._pc = null;
     this._dc = null;
     this._hostPeerId = null;
-    this._decoder = new FrameDecoder();
-    this._frameHandlers = [];
+    this._decoder = new RoboteqDecoder();
+    this._messageHandlers = [];
     this._disconnectHandlers = [];
     this._disconnected = false;
   }
@@ -72,8 +73,8 @@ export class RtcTransport {
       this._dc.onerror = () => reject(new Error('data channel error'));
       this._dc.onmessage = (event) => {
         const bytes = new Uint8Array(event.data);
-        for (const frame of this._decoder.push(bytes)) {
-          for (const cb of this._frameHandlers) cb(frame);
+        for (const msg of this._decoder.push(bytes)) {
+          for (const cb of this._messageHandlers) cb(msg);
         }
       };
     });
@@ -111,7 +112,7 @@ export class RtcTransport {
     this._dc.send(frame);
   }
 
-  onFrame(cb) { this._frameHandlers.push(cb); }
+  onMessage(cb) { this._messageHandlers.push(cb); }
   onDisconnect(cb) { this._disconnectHandlers.push(cb); }
 
   close() {

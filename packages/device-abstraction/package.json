@@ -3,6 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Manifest loader plus createDriveDevice, a WoT-style action wrapper over the transport's SET_VELOCITY frame (see ../../manifests/rover.manifest.json).",
+  "description": "Manifest loader plus createDriveDevice, a WoT-style action wrapper that emits Roboteq !G commands via the transport (see ../../manifests/former.manifest.json and ../../../former-motor-protocol.md).",
   "main": "src/index.js"
 }

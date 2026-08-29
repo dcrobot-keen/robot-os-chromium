@@ -1,0 +1,21 @@
+{
+  "robot": "former-01",
+  "base": "roboteq",
+  "transport": { "kind": "roboteq-serial", "baud": 115200, "device": "/dev/ttyMOTOR" },
+  "drive": {
+    "channels": { "left": 1, "right": 2 },
+    "maxWheelRpm": 200,
+    "commandUnitsFullScale": 1000,
+    "countsPerRev": 16384,
+    "wheelRadius": 0.085,
+    "wheelSeparation": 0.305,
+    "readback": {
+      "encoder": "?C",
+      "battery": "?V 2",
+      "current": "?A",
+      "temperature": "?T 1",
+      "faultFlags": "?FF",
+      "estopButton": "?DI"
+    }
+  }
+}

@@ -1,17 +1,25 @@
-// WebSocketTransport — the first real HardwareTransport implementation.
-// Uses the global `WebSocket` (available in every browser and, since
-// Node 22, in Node itself) so the exact same class runs unmodified in a
-// real Chromium tab and in a Node.js test client. This is what stands in
-// for `WebSerialTransport` until a target board exists (plan.md Phase 2).
+// WebSocketTransport — the HardwareTransport implementation used for
+// testing against the firmware simulator (a real board will get a
+// WebSerialTransport with the same shape). Uses the global `WebSocket`
+// (browser, and Node 22+) so the exact same class runs unmodified in a
+// Chromium tab and in a Node.js test client.
+//
+// The payload on the wire is now the Roboteq ASCII line protocol
+// (former-motor-protocol.md): send() takes the bytes of a command line
+// (build them with encodeCommand from roboteq.js); onMessage() delivers
+// parsed replies ({type:'ack'|'reply'|'line', ...}); onRaw() delivers the
+// undecoded bytes, for a pass-through relay that must not parse (the
+// Phase 5 RtcHostBridge).
 
-import { FrameDecoder } from './frame.js';
+import { RoboteqDecoder } from './roboteq.js';
 
 export class WebSocketTransport {
   constructor(url) {
     this._url = url;
     this._ws = null;
-    this._decoder = new FrameDecoder();
-    this._frameHandlers = [];
+    this._decoder = new RoboteqDecoder();
+    this._messageHandlers = [];
+    this._rawHandlers = [];
     this._disconnectHandlers = [];
   }
 
@@ -27,8 +35,9 @@ export class WebSocketTransport {
       ws.onerror = (err) => reject(err);
       ws.onmessage = (event) => {
         const bytes = new Uint8Array(event.data);
-        for (const frame of this._decoder.push(bytes)) {
-          for (const cb of this._frameHandlers) cb(frame);
+        for (const cb of this._rawHandlers) cb(bytes);
+        for (const msg of this._decoder.push(bytes)) {
+          for (const cb of this._messageHandlers) cb(msg);
         }
       };
       ws.onclose = () => {
@@ -49,8 +58,12 @@ export class WebSocketTransport {
     this._ws?.close();
   }
 
-  onFrame(cb) {
-    this._frameHandlers.push(cb);
+  onMessage(cb) {
+    this._messageHandlers.push(cb);
+  }
+
+  onRaw(cb) {
+    this._rawHandlers.push(cb);
   }
 
   onDisconnect(cb) {

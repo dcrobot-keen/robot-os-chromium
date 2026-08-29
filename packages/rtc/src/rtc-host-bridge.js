@@ -5,26 +5,24 @@
 // pipe between that operator's data channel and a WebSocket to the
 // firmware:
 //
-//   operator data channel  --bytes-->  firmware sim
-//   firmware sim  --frames-->  re-encoded  --bytes-->  operator data channel
+//   operator data channel  <--raw bytes-->  firmware
 //
 // What it deliberately does NOT do:
-//   - It never sends heartbeats. The operator owns the heartbeat (see
-//     rtc-transport.js). If the operator drops, the sim watchdog stops the
-//     motors on its own ~300ms later.
-//   - It never issues ESTOP or inspects commands. The firmware is the
-//     authority; this is just a relay.
+//   - It never sends the keepalive. The operator owns it (see
+//     rtc-transport.js). If the operator drops, the Roboteq serial
+//     watchdog stops the motors on its own ~1s later.
+//   - It never issues ESTOP or parses traffic. The firmware is the
+//     authority; this is just a relay (uses transport.onRaw, not onMessage).
 //
-// One firmware WebSocket per operator session. The firmware sim only
-// re-arms out of its cold-boot / post-ESTOP safe state on a *new*
-// connection (it does not re-arm on heartbeat alone), so mapping "an
-// operator is connected" to "a WebSocket to the firmware is open" is what
-// lets an operator connect, drive, disconnect, and reconnect correctly.
+// One firmware WebSocket per operator session. The firmware only re-arms
+// out of its post-watchdog / post-ESTOP safe state on a *new* connection
+// (a !MG from the operator also does it), so mapping "an operator is
+// connected" to "a WebSocket to the firmware is open" keeps connect ->
+// drive -> disconnect -> reconnect correct.
 // Whether the real on-robot host should behave the same way — or expose an
 // explicit re-arm — is an open item (plan.md Phase 5).
 
 import { WebSocketTransport } from '../../transport/src/websocket-transport.js';
-import { encodeFrame } from '../../transport/src/frame.js';
 
 const DEFAULT_RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -85,10 +83,10 @@ export class RtcHostBridge {
       // the "connection" the firmware watchdog re-arms on.
       const firmware = new WebSocketTransport(this._firmwareUrl);
       session.firmware = firmware;
-      firmware.onFrame(({ cmd, payload }) => {
+      firmware.onRaw((bytes) => {
         if (session.dc?.readyState === 'open') {
-          session.dc.send(encodeFrame(cmd, payload));
-          session.bytesToOperator += payload.length + 6;
+          session.dc.send(bytes);
+          session.bytesToOperator += bytes.length;
         }
       });
       firmware.onDisconnect(() => this._closeSession(operatorId, 'firmware connection closed'));
@@ -106,8 +104,8 @@ export class RtcHostBridge {
     dc.onmessage = (event) => {
       const bytes = new Uint8Array(event.data);
       session.bytesToFirmware += bytes.length;
-      // Forward raw — the firmware's own FrameDecoder is the authority on
-      // what's a valid frame. The bridge does not parse operator traffic.
+      // Forward raw — the firmware's own decoder is the authority on what's
+      // a valid command line. The bridge does not parse operator traffic.
       session.firmware?.send(bytes).catch((err) => {
         this._onEvent({ type: 'firmware-send-error', operatorId, message: err.message || String(err) });
       });

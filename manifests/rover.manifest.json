@@ -1,8 +1,0 @@
-{
-  "robot": "rover-01",
-  "transport": "websocket-prototype",
-  "drive": {
-    "setVelocity": "SET_VELOCITY",
-    "velocity": "GET_ENCODER"
-  }
-}

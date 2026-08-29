@@ -42,7 +42,7 @@ try {
   await wait(400); // let the server bind
 
   // --- host registers into an empty room ---------------------------------
-  const host = new SignalingClient(URL, { role: 'host', robot: 'rover-01', manifest: { robot: 'rover-01' } });
+  const host = new SignalingClient(URL, { role: 'host', robot: 'former-01', manifest: { robot: 'former-01' } });
   const hostJoined = recorder();
   const hostLeft = recorder();
   const hostSignals = recorder();
@@ -53,7 +53,7 @@ try {
   check('host ready with empty room', Array.isArray(hostReady.peers) && hostReady.peers.length === 0);
 
   // --- a second host for the same robot is rejected ---------------------
-  const host2 = new SignalingClient(URL, { role: 'host', robot: 'rover-01' });
+  const host2 = new SignalingClient(URL, { role: 'host', robot: 'former-01' });
   let host2Err = null;
   try {
     await host2.connect();
@@ -64,7 +64,7 @@ try {
   host2.close();
 
   // --- operator joins, both sides learn about each other ---------------
-  const op = new SignalingClient(URL, { role: 'operator', robot: 'rover-01' });
+  const op = new SignalingClient(URL, { role: 'operator', robot: 'former-01' });
   const opSignals = recorder();
   op.onSignal(opSignals.fn);
   const opReady = await op.connect();
@@ -90,7 +90,7 @@ try {
     opSignals.calls[1].data.candidate.candidate === 'FAKE-ICE');
 
   // --- list reflects the room --------------------------------------
-  const lister = new SignalingClient(URL, { role: 'operator', robot: 'rover-99' });
+  const lister = new SignalingClient(URL, { role: 'operator', robot: 'former-99' });
   await lister.connect();
   const robots = await new Promise((res) => {
     lister._ws.addEventListener('message', (e) => {
@@ -99,9 +99,9 @@ try {
     });
     lister._ws.send(JSON.stringify({ type: 'list' }));
   });
-  const rover01 = robots.find((r) => r.robot === 'rover-01');
-  check('list shows rover-01 online with 1 operator and a manifest',
-    rover01 && rover01.online === true && rover01.operators === 1 && rover01.manifest?.robot === 'rover-01');
+  const former01 = robots.find((r) => r.robot === 'former-01');
+  check('list shows former-01 online with 1 operator and a manifest',
+    former01 && former01.online === true && former01.operators === 1 && former01.manifest?.robot === 'former-01');
   lister.close();
 
   // --- operator leaves, host is told -----------------------------

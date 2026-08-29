@@ -7,14 +7,14 @@
 // Loaded from a page with: new SharedWorker(url, { type: 'module' })
 //
 // Protocol between a tab's port and this worker (all messages are plain
-// objects, sent with postMessage — Uint8Array frames survive structured
-// clone fine, no manual serialization needed):
+// objects, sent with postMessage — Uint8Array command bytes survive
+// structured clone fine, no manual serialization needed):
 //   tab -> worker   { type: 'connect' }
 //   tab -> worker   { type: 'send', frame: Uint8Array }
 //   worker -> tab   { type: 'status', connected: boolean }        (broadcast)
 //   worker -> tab   { type: 'connect-error', message }            (to the requester only)
 //   worker -> tab   { type: 'send-error', message }               (to the requester only)
-//   worker -> tab   { type: 'frame', cmd, payload }                (broadcast — includes heartbeat echoes)
+//   worker -> tab   { type: 'message', msg }                       (broadcast — parsed Roboteq reply)
 //   worker -> tab   { type: 'heartbeat-sent' }                     (broadcast)
 //   worker -> tab   { type: 'heartbeat-gap', gap }                 (broadcast)
 //   worker -> tab   { type: 'heartbeat-error', message }           (broadcast)
@@ -33,7 +33,7 @@ function broadcast(msg) {
   for (const port of ports) port.postMessage(msg);
 }
 
-transport.onFrame((frame) => broadcast({ type: 'frame', cmd: frame.cmd, payload: frame.payload }));
+transport.onMessage((msg) => broadcast({ type: 'message', msg }));
 transport.onDisconnect(() => {
   connected = false;
   broadcast({ type: 'status', connected: false });

@@ -1,25 +1,17 @@
-// startHeartbeat — the same keep-alive loop that was duplicated across
-// scripts/prototype-client.mjs and apps/dashboard/index.html, pulled out
-// once there were three call sites (the teleop dashboard being the third).
-// Includes the send-gap diagnostic added after the unexplained ~23s
-// heartbeat stall seen in the first real-browser test (plan.md, "Phase 2
-// 진행" section) — any transport using this helper gets that diagnostic
-// for free instead of every page reimplementing it.
+// startHeartbeat — the keepalive loop. On the Former's Roboteq base the
+// liveness signal is simply "keep sending commands": the controller's
+// serial watchdog (RWD, ~1s) stops the motors if the wire goes quiet.
+// This sends "!B 3 1" every 100ms — the same keepalive bool the reference
+// ROS driver writes every control cycle, also watched by the onboard
+// safety script (former-motor-protocol.md).
+//
+// Keeps the send-gap diagnostic added after the unexplained ~23s heartbeat
+// stall in the first real-browser test (plan.md, "Phase 2 진행"): onGap
+// fires when the gap since the previous send exceeds gapWarnMs.
 
-import { encodeFrame } from './frame.js';
-import { CMD } from './commands.js';
+import { encodeCommand, cmd } from './roboteq.js';
 
-function heartbeatFrame(seq) {
-  const payload = new Uint8Array(2);
-  new DataView(payload.buffer).setUint16(0, seq, true);
-  return encodeFrame(CMD.HEARTBEAT, payload);
-}
-
-// onGap(gapMs) fires when the time since the previous send exceeds
-// gapWarnMs (default 150; the interval itself is 100ms, so this flags a
-// tick that was throttled, blocked, or otherwise late).
 export function startHeartbeat(transport, { intervalMs = 100, gapWarnMs = 150, onGap, onSend, onSendError } = {}) {
-  let seq = 0;
   let lastSendAt = null;
 
   const timer = setInterval(async () => {
@@ -29,8 +21,8 @@ export function startHeartbeat(transport, { intervalMs = 100, gapWarnMs = 150, o
     if (gap > gapWarnMs && onGap) onGap(gap);
 
     try {
-      await transport.send(heartbeatFrame(seq++));
-      if (onSend) onSend(seq);
+      await transport.send(encodeCommand(cmd.keepAlive()));
+      if (onSend) onSend();
     } catch (err) {
       if (onSendError) onSendError(err);
     }

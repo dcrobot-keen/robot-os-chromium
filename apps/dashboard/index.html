@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8" />
-<title>rover-01 teleop</title>
+<title>former-01 teleop</title>
 <style>
   body { font-family: ui-monospace, monospace; max-width: 640px; margin: 40px auto; padding: 0 16px; }
   h1 { font-size: 16px; }
@@ -18,12 +18,13 @@
 </style>
 </head>
 <body>
-  <h1>rover-01 teleop — Phase 5</h1>
+  <h1>former-01 teleop — Phase 5</h1>
   <p>
-    Gamepad drives the rover: <code>TeleopNode</code> polls the Gamepad API and publishes
+    Gamepad drives the base: <code>TeleopNode</code> polls the Gamepad API and publishes
     <code>{left, right}</code> onto the local bus; this page's own bus subscription forwards it to
-    <code>createDriveDevice</code>, which encodes a <code>SET_VELOCITY</code> frame and sends it through
-    the transport. Manual sliders go through the exact same bus topic — no separate code path.
+    <code>createDriveDevice</code>, which sends a Roboteq <code>!G 1 n_!G 2 n</code> command through
+    the transport (see <code>former-motor-protocol.md</code>). Manual sliders go through the exact same
+    bus topic — no separate code path.
   </p>
   <p>
     <strong>Local</strong> mode connects through a <code>SharedWorker</code> that owns one connection
@@ -62,14 +63,14 @@
   <div class="row"><div id="log"></div></div>
 
   <script type="module">
-    import { CMD, startHeartbeat } from '../../packages/transport/src/index.js';
+    import { startHeartbeat } from '../../packages/transport/src/index.js';
     import { loadManifest, createDriveDevice } from '../../packages/device-abstraction/src/index.js';
     import { LocalBus, HardwareBridgeClient } from '../../packages/bus/src/index.js';
     import { TeleopNode } from '../../packages/nodes/src/index.js';
     import { SignalingClient, RtcTransport } from '../../packages/rtc/src/index.js';
 
-    const DRIVE_CMD_TOPIC = 'rover-01/drive/cmd_vel';
-    const MANIFEST_URL = '/manifests/rover.manifest.json';
+    const DRIVE_CMD_TOPIC = 'former-01/drive/cmd_vel';
+    const MANIFEST_URL = '/manifests/former.manifest.json';
     const WORKER_URL = '/packages/bus/src/hardware-bridge-worker.js';
 
     const statusEl = document.getElementById('status');
@@ -160,8 +161,11 @@
       const drive = createDriveDevice(transport, manifest);
       bus = new LocalBus(`ros-chromium/${manifest.robot}`);
 
-      transport.onFrame(({ cmd }) => {
-        if (cmd === CMD.HEARTBEAT) {
+      transport.onMessage((msg) => {
+        // "+" ack — the Roboteq controller acknowledged a command. The
+        // keepalive ("!B 3 1") produces one every 100ms, so this tracks
+        // round-trip liveness the way heartbeat echoes used to.
+        if (msg.type === 'ack' && msg.ok) {
           ackCount++;
           hbAckCountEl.textContent = String(ackCount);
         }
@@ -196,21 +200,31 @@
       statusEl.className = 'connected';
 
       if (mode === 'operator') {
-        // RtcTransport carries no heartbeat of its own — this tab owns it,
+        // RtcTransport carries no keepalive of its own — this tab owns it,
         // exactly as the pre-Phase-4 dashboard did. This is the load-bearing
-        // choice: the heartbeat rides the operator's own link, so an
-        // operator that freezes or drops stops the robot ~300ms later.
+        // choice: the "!B 3 1" keepalive rides the operator's own link, so an
+        // operator that freezes or drops lets the Roboteq watchdog stop the
+        // robot ~1s later.
         heartbeat = startHeartbeat(transport, {
           onSend: () => { sentCount++; hbSentCountEl.textContent = String(sentCount); },
           onGap: (gap) => {
             hbGapEl.textContent = `${gap.toFixed(0)}ms`;
-            log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms)`);
+            log(`keepalive send gap ${gap.toFixed(0)}ms (expected ~100ms)`);
           },
-          onSendError: (err) => log(`heartbeat send failed: ${err.message || err}`),
+          onSendError: (err) => log(`keepalive send failed: ${err.message || err}`),
         });
-        log('connected — driving a remote robot over WebRTC; this tab owns the heartbeat');
+        log('connected — driving a remote robot over WebRTC; this tab owns the keepalive');
       } else {
         log('connected — this tab is one of possibly several sharing the same worker connection');
+      }
+
+      // Motors come up disabled (and after any E-STOP / watchdog trip) —
+      // release them once we're connected.
+      try {
+        await drive.enable();
+        log('sent !MG — motors enabled');
+      } catch (err) {
+        log(`enable (!MG) failed: ${err.message || err}`);
       }
 
       bus.subscribe(DRIVE_CMD_TOPIC, async ({ left, right }) => {
