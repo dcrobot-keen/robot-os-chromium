@@ -80,6 +80,20 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 이후 실제 크롬 테스트에서 같은 값이 50ms가 아니라 500ms 이상 간격으로만 로그에 찍히는 현상이 나와서 원인을 조사했지만, 결과적으로 그 테스트는 애초에 게임패드가 연결되지 않은 상태에서 진행된 것이었다 — `connectedGamepad()`가 `null`을 반환하니 `_tick()`이 매번 조기 리턴했을 뿐, 로그에 찍힌 값은 화면 수동 슬라이더에서 온 것이었다. 즉 버그가 아니라 전제가 틀린 조사였다. 그래도 조사 과정에서 만든 `onTick(pad)` 콜백(매 폴링마다, 게임패드가 없어도 호출)과 대시보드의 `teleop ticks/s`/`gamepad seen/s`/`raw axes` 카운터는 남겨뒀는데, 실제로 도움이 됐다 — 진짜 게임패드로 재시도했을 때는 `velocity set`이 정확히 ~50ms 간격으로, 스틱을 중립에 두면 데드존대로 `left=0 right=0`이 찍히는 걸로 폴링과 발행 로직이 설계대로 동작한다는 게 확인됐다(`plan.md` "실제 게임패드로 재시도 — 통과" 참고). Phase 3의 게임패드 통과 기준은 이걸로 충족됐다.
 
+## packages/planner-wasm/src/index.js
+
+`loadPlanner()` — 자매 프로젝트 `pathfinder`(별개 GitHub 저장소, `robot-project/pathfinder`)의 `grid` 패키지(Go, Grid A*/Hybrid A*)를 컴파일한 WASM 빌드를 로드해 `findPath(request)`를 노출한다. `vendor/pathfinder.wasm` + `vendor/wasm_exec.js`는 이 저장소가 유지보수하는 소스가 아니라 vendor된 빌드 산출물이다 — `robot-base`의 `roboteq.js`가 이 저장소에도 바이트 단위로 복제되어 있는 것과 같은 원칙("두 저장소가 파일시스템 경로를 공유하지 않는다")으로, `pathfinder` 쪽에서 `npm run build:wasm`을 돌린 뒤 이 패키지의 `scripts/refresh-vendor.mjs`로 갱신한다.
+
+`fetch(wasmUrl)`이 기본 바이트 로더인데, Node의 내장 `fetch`는 `file:` URL을 지원하지 않아서(HTTP(S) 전용) 브라우저에서는 그대로 쓰고 Node 테스트(`scripts/planner-wasm-smoke.mjs`)는 `loadBytes` 옵션으로 `readFile` 기반 로더를 주입한다. Go 프로그램의 `main()`이 `select{}`로 절대 끝나지 않으므로 `go.run(instance)`를 awiat하지 않고(끝나길 기다리면 영원히 안 끝남), 대신 `main.go`가 `pathfinderFindPath`를 등록한 직후 호출하는 `globalThis.__pathfinderWasmReady()`로 준비 완료 시점을 정확히 신호받는다(고정 `setTimeout` 추측 대신).
+
+## packages/nodes/src/planner-node.js
+
+`PlannerNode` — roadmap.md Phase 7의 "PlannerNode: 격자 A* → path"를 위 `planner-wasm`으로 구현. `requestTopic`을 구독해 `{ requestId, ...findPathRequest }`를 받으면 WASM 호출 결과(또는 에러)를 `{ requestId, path, distance }`(또는 `{ requestId, error }`) 형태로 `pathTopic`에 발행한다. 격자를 스스로 만들지 않는다는 점이 중요 — LIDAR 스캔에서 격자를 누적하는 `MapNode`도, 경로를 `cmd_vel`로 바꾸는 `PathFollowerNode`도 아직 없어서(둘 다 roadmap.md Phase 7의 나머지 항목), 지금은 요청에 격자를 통째로 실어 보내야 한다.
+
+## scripts/planner-wasm-smoke.mjs
+
+`planner-wasm` + `PlannerNode`를 브라우저 없이 검증하는 스모크 테스트. pathfinder의 Go 테스트가 이미 다루는 시나리오(열린 공간, 벽 우회, Hybrid A*, 완전히 막힌 목적지)를 WASM 경유로 재확인하고, `grid.NewGridFromOccupancy`(원시 점유 비트맵) 경로가 동등한 폴리곤 기반 경로와 같은 결과를 내는지, 그리고 `PlannerNode`를 통한 `LocalBus` 요청/응답 왕복까지 확인한다(6개 체크). `node scripts/planner-wasm-smoke.mjs`. 2026-08-29에 이 스모크 테스트와 별개로, 실제 Chromium(Node/V8이 아니라)에서 `findPath`를 직접 호출해 동일한 결과(거리 9.806, 경로점 41개)가 나오는 것도 수동으로 확인했다.
+
 ## apps/signaling-server/src/index.js
 
 WebRTC 시그널링만 하는 최소 WebSocket 서버. robot id 하나가 "방" 하나이고, 방마다 host 하나 + operator 여럿이 붙는다. 클라이언트가 보내는 메시지는 세 가지뿐이다 — `hello`(role + robot id, host면 manifest도 옵션), `signal`(상대에게 그대로 넘길 불투명한 `data` 블롭), `list`(알려진 로봇 목록, Phase 6 씨앗). 서버는 `signal`의 `data` 안을 절대 들여다보지 않는다. `hello`에 대한 응답 `ready`에는 이미 방에 있던 피어 목록을 실어줘서, 새로 들어온 쪽이 WebRTC offer를 지금 보낼지 상대가 올 때까지 기다릴지 판단하게 한다. 같은 robot에 두 번째 host가 붙으면 거부한다. 포트는 `SIGNALING_PORT`(기본 9770). 로봇 명령·텔레메트리는 여기를 절대 지나가지 않는다 — 핸드셰이크가 끝나면 데이터채널로 P2P로 흐른다.

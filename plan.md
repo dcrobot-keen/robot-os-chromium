@@ -383,6 +383,19 @@ RWD 워치독 체크도 다시 봤다: 기존 코드는 `!G`를 마지막으로 
 
 체크 개수는 그대로 8/8(로직만 교체, 새 체크 추가 아님). 이 테스트가 검증하는 건 여전히 "시뮬레이터가 문서화된 RWD 사양대로 동작하고 JS 쪽 연동(코덱/transport/createDriveDevice)이 정확한가"까지다 — 실제 Former 2.0의 Roboteq 컨트롤러가 진짜로 이 타이밍을 지키는지는 실기 검증 전까지는 알 수 없다는 한계는 그대로 남아 있다.
 
+## Phase 7 착수 — PlannerNode, `pathfinder`의 WASM 빌드 재사용 (roadmap.md)
+
+`roadmap.md`가 스케치한 Phase 7("길찾기 계층, 시뮬레이터 상대")의 "PlannerNode — 격자 A*(또는 Theta*) → path" 부분을 처음부터 새로 짜는 대신, 워크스페이스의 자매 프로젝트 `pathfinder`(별개 GitHub 저장소, `robot-project/pathfinder`)가 이미 갖고 있던 Go 경로탐색 코드를 재사용하기로 했다. `pathfinder/pathfinder/grid` 패키지는 Grid A*/Hybrid A*를 30개 넘는 Go 테스트로 검증하며 이미 `pathfinder`의 HTTP API 뒤에서 실제로 돌고 있었고, 표준 라이브러리만 써서 외부 의존성이 없어 WASM 크로스 컴파일이 그대로 됐다.
+
+**한 프로토타입(Node/V8)으로 먼저 확인**: `go.mod replace`로 실제 `pathfinder/grid` 패키지를 그대로 참조하는 작은 `syscall/js` 어댑터를 짜서 `GOOS=js GOARCH=wasm`으로 컴파일 → Node에서 로드해 pathfinder의 기존 Go 테스트와 같은 시나리오(열린 공간/벽 우회/Hybrid A*/완전히 막힌 목적지)를 재확인. 전부 일치, 코드 수정 0줄, 바이너리 2.3MB(gzip 0.68MB), 200x200 격자에서 호출당 평균 1.7ms. 이 결과를 보고 실제 패키지로 옮기기로 함.
+
+**실제 통합:**
+- `pathfinder` 저장소에 `pathfinder/wasm/main.go`(정식 export 표면, `//go:build js && wasm`로 일반 빌드에서 제외)와 `grid.NewGridFromOccupancy`(폴리곤 대신 원시 점유 비트맵을 직접 주입 — LIDAR로 누적한 costmap처럼 이미 셀 단위 정보가 있는 호출자를 위함) 추가.
+- 이 저장소에 `packages/planner-wasm`(vendor/에 빌드 산출물 커밋 — `robot-base`의 `roboteq.js`처럼 두 저장소가 파일시스템 경로를 공유하지 않는 원칙 유지, `scripts/refresh-vendor.mjs`로 갱신) + `packages/nodes/PlannerNode`(plan-request 토픽 구독 → WASM 호출 → path 토픽 발행) 추가.
+- `scripts/planner-wasm-smoke.mjs`(6개 체크, `npm test`에 배선)로 Node 검증, 추가로 실제 Chrome에서 수동으로 `findPath` 직접 호출해 Node와 동일한 결과(distance 9.806, path 41점)를 확인 — RWD 스모크 테스트와 달리 이번엔 실브라우저까지 확인함.
+
+**남은 것 (Phase 7 전체로 보면 절반)**: 이 노드는 "격자가 주어지면 경로를 찾는다"만 한다. 그 격자를 LIDAR 스캔으로 직접 만드는 `MapNode`, 경로를 `cmd_vel`로 바꾸는 `PathFollowerNode`, 그리고 로봇의 실측 pose를 공급하는 `OdometryNode`는 아직 없다 — roadmap.md Phase 7의 나머지 항목.
+
 ## 아직 정하지 않은 것
 
 정확한 RS232 커맨드 어휘와 Former 베이스의 명령 타임아웃(워치독) 동작은
