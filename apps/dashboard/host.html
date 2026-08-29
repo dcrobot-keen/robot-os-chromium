@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>rover-01 host bridge</title>
+<style>
+  body { font-family: ui-monospace, monospace; max-width: 640px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 16px; }
+  #status { font-weight: bold; }
+  .on { color: #2a7d2a; }
+  .off { color: #a33; }
+  button { font-family: inherit; padding: 6px 14px; margin-right: 8px; }
+  label { display: inline-block; }
+  input[type="text"] { font-family: inherit; width: 260px; }
+  #log { background: #111; color: #ddd; padding: 10px; height: 240px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+  .row { margin: 12px 0; }
+  code { background: #eee; padding: 1px 4px; }
+  table { border-collapse: collapse; font-size: 12px; }
+  td, th { border: 1px solid #ccc; padding: 2px 8px; text-align: left; }
+</style>
+</head>
+<body>
+  <h1>rover-01 host bridge — Phase 5</h1>
+  <p>
+    This page runs on the machine that can reach the firmware. It registers as the robot's
+    <code>host</code> with the signaling server and then relays bytes between each remote
+    <code>operator</code>'s WebRTC data channel and a WebSocket to the firmware. It does
+    <strong>not</strong> drive the robot and <strong>never sends heartbeats</strong> — the operator
+    owns the heartbeat, so if an operator drops, the firmware watchdog zeroes the motors on its own
+    ~300ms later. Open <code>index.html</code> in operator mode (same machine is fine for a first test)
+    to connect to this bridge.
+  </p>
+
+  <div class="row">Bridge: <span id="status" class="off">stopped</span></div>
+  <div class="row">
+    <label>signaling <input id="sigUrl" type="text" value="ws://127.0.0.1:9770" /></label>
+  </div>
+  <div class="row">
+    <label>firmware &nbsp;<input id="fwUrl" type="text" value="ws://127.0.0.1:8765" /></label>
+  </div>
+  <div class="row">
+    <label>robot id &nbsp;&nbsp;<input id="robotId" type="text" value="rover-01" /></label>
+    <button id="startBtn">Start bridge</button>
+  </div>
+
+  <div class="row">
+    <table id="ops">
+      <thead><tr><th>operator</th><th>firmware link</th><th>bytes → firmware</th><th>bytes → operator</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="row"><div id="log"></div></div>
+
+  <script type="module">
+    import { loadManifest } from '../../packages/device-abstraction/src/index.js';
+    import { SignalingClient, RtcHostBridge } from '../../packages/rtc/src/index.js';
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const startBtn = document.getElementById('startBtn');
+    const opsBody = document.querySelector('#ops tbody');
+    const MANIFEST_URL = '/manifests/rover.manifest.json';
+
+    function log(msg) {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(line);
+    }
+
+    // operatorId -> <tr>
+    const rows = new Map();
+    function row(operatorId) {
+      let tr = rows.get(operatorId);
+      if (!tr) {
+        tr = document.createElement('tr');
+        tr.innerHTML = `<td>${operatorId}</td><td class="fw">–</td><td class="tofw">0</td><td class="toop">0</td>`;
+        opsBody.appendChild(tr);
+        rows.set(operatorId, tr);
+      }
+      return tr;
+    }
+
+    let bridge = null;
+
+    startBtn.addEventListener('click', async () => {
+      if (bridge) return log('bridge already running');
+      startBtn.disabled = true;
+
+      const sigUrl = document.getElementById('sigUrl').value.trim();
+      const fwUrl = document.getElementById('fwUrl').value.trim();
+      const robot = document.getElementById('robotId').value.trim();
+
+      let manifest = null;
+      try {
+        manifest = await loadManifest(MANIFEST_URL);
+        log(`manifest loaded (robot=${manifest.robot}) — will publish it to the registry`);
+      } catch (err) {
+        log(`no manifest (${err.message || err}) — registering without one`);
+      }
+
+      const sig = new SignalingClient(sigUrl, { role: 'host', robot, manifest });
+      sig.onClose(() => {
+        statusEl.textContent = 'signaling closed';
+        statusEl.className = 'off';
+        log('signaling connection closed');
+      });
+
+      bridge = new RtcHostBridge(sig, fwUrl, {
+        onEvent: (e) => {
+          switch (e.type) {
+            case 'started':
+              statusEl.textContent = `registered as host for ${robot} (peer ${e.peerId})`;
+              statusEl.className = 'on';
+              log(`bridge started, waiting for operators`);
+              break;
+            case 'operator-joined':
+              row(e.operatorId);
+              log(`operator ${e.operatorId} joined — answering offer`);
+              break;
+            case 'firmware-connected':
+              row(e.operatorId).querySelector('.fw').textContent = 'connected';
+              log(`operator ${e.operatorId}: firmware link up`);
+              break;
+            case 'firmware-error':
+              row(e.operatorId).querySelector('.fw').textContent = 'error';
+              log(`operator ${e.operatorId}: firmware error — ${e.message}`);
+              break;
+            case 'firmware-send-error':
+              log(`operator ${e.operatorId}: forward to firmware failed — ${e.message}`);
+              break;
+            case 'operator-left': {
+              const tr = rows.get(e.operatorId);
+              if (tr) { tr.querySelector('.fw').textContent = `gone (${e.reason})`; }
+              log(`operator ${e.operatorId} left — ${e.reason}`);
+              break;
+            }
+          }
+        },
+      });
+
+      try {
+        await bridge.start();
+      } catch (err) {
+        log(`bridge failed to start: ${err.message || err}`);
+        bridge = null;
+        startBtn.disabled = false;
+        return;
+      }
+
+      // Cheap byte-counter refresh straight off the bridge's session map.
+      setInterval(() => {
+        for (const [operatorId, s] of bridge._sessions) {
+          const tr = row(operatorId);
+          tr.querySelector('.tofw').textContent = String(s.bytesToFirmware);
+          tr.querySelector('.toop').textContent = String(s.bytesToOperator);
+        }
+      }, 500);
+    });
+  </script>
+</body>
+</html>

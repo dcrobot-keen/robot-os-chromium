@@ -7,6 +7,7 @@
 // send(frame: Uint8Array): Promise<void>
 // onFrame(cb: (frame: { cmd: number, payload: Uint8Array }) => void): void
 // onDisconnect(cb: () => void): void
+// close?(): void   — optional: deliberate clean shutdown
 //
 // Implemented so far:
 //   - WebSocketTransport — uses the global WebSocket, so it runs unchanged

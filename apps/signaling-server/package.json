@@ -3,5 +3,11 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "TODO (plan.md Phase 5) — minimal WebSocket server for SDP/ICE exchange and the robot registry. Never carries robot command or telemetry traffic."
+  "description": "Minimal WebSocket server for WebRTC signaling (SDP/ICE relay) and, later (plan.md Phase 6), the robot registry. Never carries robot command or telemetry traffic — those go peer-to-peer over the WebRTC data channel once signaling is done.",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
 }

@@ -3,5 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "TODO (plan.md Phase 5) — WebRTC data channel wrapper + signaling client, for remote sessions only. Not on the critical path for local teleop."
+  "description": "WebRTC data channel + signaling client for remote sessions (plan.md Phase 5). The operator side (RtcTransport) implements the same HardwareTransport shape as WebSocketTransport, so the dashboard drives a remote robot with the same code it uses locally. Not on the critical path for local teleop.",
+  "main": "src/index.js"
 }

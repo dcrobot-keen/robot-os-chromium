@@ -41,6 +41,14 @@ export class WebSocketTransport {
     this._ws.send(frame);
   }
 
+  // Optional part of the interface: a clean, deliberate close (sends the WS
+  // close frame). The prototype client still avoids this on purpose to
+  // simulate a crash (see its comment); the Phase 5 host bridge uses it to
+  // end one operator's firmware session tidily so the next one re-arms.
+  close() {
+    this._ws?.close();
+  }
+
   onFrame(cb) {
     this._frameHandlers.push(cb);
   }

@@ -13,21 +13,34 @@
   #log { background: #111; color: #ddd; padding: 10px; height: 220px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
   .row { margin: 12px 0; }
   input[type="range"] { width: 200px; }
+  input[type="text"] { font-family: inherit; width: 240px; }
   code { background: #eee; padding: 1px 4px; }
 </style>
 </head>
 <body>
-  <h1>rover-01 teleop — Phase 4</h1>
+  <h1>rover-01 teleop — Phase 5</h1>
   <p>
     Gamepad drives the rover: <code>TeleopNode</code> polls the Gamepad API and publishes
     <code>{left, right}</code> onto the local bus; this page's own bus subscription forwards it to
     <code>createDriveDevice</code>, which encodes a <code>SET_VELOCITY</code> frame and sends it through
-    <code>HardwareBridgeClient</code>. The manual sliders below go through the exact same bus topic —
-    there's no separate code path for manual vs. gamepad control. Unlike Phase 3, this tab doesn't hold
-    its own connection: <code>HardwareBridgeClient</code> talks to a <code>SharedWorker</code> that owns
-    the one real connection for every tab of this page. Open this page in a second tab to see it —
-    the firmware sim's log should show only one <code>connection opened</code>, not two.
+    the transport. Manual sliders go through the exact same bus topic — no separate code path.
   </p>
+  <p>
+    <strong>Local</strong> mode connects through a <code>SharedWorker</code> that owns one connection
+    for every tab of this page (Phase 4). <strong>Operator</strong> mode connects to a remote robot
+    over a WebRTC data channel (<code>RtcTransport</code>) via the signaling server (Phase 5) — a
+    <code>host.html</code> bridge must be running for that robot. Everything above the transport is
+    identical in both modes; only the transport constructor changes.
+  </p>
+
+  <div class="row">
+    Mode:
+    <label><input type="radio" name="mode" value="local" checked /> local (shared worker)</label>
+    <label><input type="radio" name="mode" value="operator" /> operator (remote WebRTC)</label>
+  </div>
+  <div class="row" id="sigRow" hidden>
+    <label>signaling <input id="sigUrl" type="text" value="ws://127.0.0.1:9770" /></label>
+  </div>
 
   <div class="row">Connection: <span id="status" class="disconnected">disconnected</span></div>
   <div class="row">Gamepad: <span id="gamepadStatus" class="disconnected">none connected</span></div>
@@ -49,10 +62,11 @@
   <div class="row"><div id="log"></div></div>
 
   <script type="module">
-    import { CMD } from '../../packages/transport/src/index.js';
+    import { CMD, startHeartbeat } from '../../packages/transport/src/index.js';
     import { loadManifest, createDriveDevice } from '../../packages/device-abstraction/src/index.js';
     import { LocalBus, HardwareBridgeClient } from '../../packages/bus/src/index.js';
     import { TeleopNode } from '../../packages/nodes/src/index.js';
+    import { SignalingClient, RtcTransport } from '../../packages/rtc/src/index.js';
 
     const DRIVE_CMD_TOPIC = 'rover-01/drive/cmd_vel';
     const MANIFEST_URL = '/manifests/rover.manifest.json';
@@ -62,6 +76,7 @@
     const gamepadStatusEl = document.getElementById('gamepadStatus');
     const logEl = document.getElementById('log');
     const connectBtn = document.getElementById('connectBtn');
+    const sigRow = document.getElementById('sigRow');
     const hbSentCountEl = document.getElementById('hbSentCount');
     const hbAckCountEl = document.getElementById('hbAckCount');
     const hbGapEl = document.getElementById('hbGap');
@@ -70,6 +85,11 @@
     const teleopRateEl = document.getElementById('teleopRate');
     const teleopSeenRateEl = document.getElementById('teleopSeenRate');
     const teleopAxesEl = document.getElementById('teleopAxes');
+
+    const modeOf = () => document.querySelector('input[name="mode"]:checked').value;
+    for (const r of document.querySelectorAll('input[name="mode"]')) {
+      r.addEventListener('change', () => { sigRow.hidden = modeOf() !== 'operator'; });
+    }
 
     function log(msg) {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -89,16 +109,13 @@
       log('gamepad disconnected');
     });
 
-    let transport = null; // a HardwareBridgeClient, not a real connection — see the note in the intro paragraph above
+    let transport = null; // HardwareBridgeClient (local) or RtcTransport (operator)
     let bus = null;
     let teleop = null;
+    let heartbeat = null; // set only in operator mode — see note below
     let sentCount = 0;
     let ackCount = 0;
 
-    // Rate counters for TeleopNode's onTick, reset every second — added to
-    // check whether _tick() is really firing at the configured ~50ms
-    // interval in a real browser with a real gamepad (see teleop-node.js's
-    // comment on why this exists).
     let tickCountThisSecond = 0;
     let seenCountThisSecond = 0;
     setInterval(() => {
@@ -108,15 +125,38 @@
       seenCountThisSecond = 0;
     }, 1000);
 
+    function teardown(reason) {
+      statusEl.textContent = 'disconnected';
+      statusEl.className = 'disconnected';
+      heartbeat?.stop();
+      teleop?.stop();
+      bus?.close();
+      transport = null;
+      bus = null;
+      teleop = null;
+      heartbeat = null;
+      connectBtn.disabled = false;
+      log(`disconnected — ${reason}`);
+    }
+
     connectBtn.addEventListener('click', async () => {
       if (transport) return log('already connected — ignoring extra Connect click');
       connectBtn.disabled = true;
+      const mode = modeOf();
 
       log(`loading manifest from ${MANIFEST_URL} ...`);
       const manifest = await loadManifest(MANIFEST_URL);
       log(`manifest loaded: robot=${manifest.robot}`);
 
-      transport = new HardwareBridgeClient(WORKER_URL);
+      if (mode === 'operator') {
+        const sigUrl = document.getElementById('sigUrl').value.trim();
+        log(`operator mode — signaling via ${sigUrl}, robot ${manifest.robot}`);
+        const sig = new SignalingClient(sigUrl, { role: 'operator', robot: manifest.robot });
+        transport = new RtcTransport(sig);
+      } else {
+        transport = new HardwareBridgeClient(WORKER_URL);
+      }
+
       const drive = createDriveDevice(transport, manifest);
       bus = new LocalBus(`ros-chromium/${manifest.robot}`);
 
@@ -126,43 +166,53 @@
           hbAckCountEl.textContent = String(ackCount);
         }
       });
-      transport.onDisconnect(() => {
-        statusEl.textContent = 'disconnected';
-        statusEl.className = 'disconnected';
-        teleop?.stop();
-        bus?.close();
-        transport = null;
-        connectBtn.disabled = false;
-        log('disconnected — worker lost its connection to the firmware sim');
-      });
-      // Heartbeating itself now happens once, inside the worker, shared by
-      // every tab — this tab just listens for what the worker reports.
-      transport.onHeartbeatSent(() => {
-        sentCount++;
-        hbSentCountEl.textContent = String(sentCount);
-      });
-      transport.onHeartbeatGap((gap) => {
-        hbGapEl.textContent = `${gap.toFixed(0)}ms`;
-        log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — worker's timer was throttled or blocked`);
-      });
-      transport.onHeartbeatError((err) => log(`heartbeat send failed: ${err.message || err}`));
-      transport.onSendError((err) => log(`send failed: ${err.message || err}`));
+      transport.onDisconnect(() => teardown(
+        mode === 'operator' ? 'data channel to the host closed' : 'worker lost its connection to the firmware sim'));
 
-      log(`connecting via shared worker (${WORKER_URL}) ...`);
+      if (mode === 'local') {
+        // Heartbeating happens once, inside the shared worker; this tab just
+        // listens for what the worker reports.
+        transport.onHeartbeatSent(() => { sentCount++; hbSentCountEl.textContent = String(sentCount); });
+        transport.onHeartbeatGap((gap) => {
+          hbGapEl.textContent = `${gap.toFixed(0)}ms`;
+          log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms) — worker's timer was throttled or blocked`);
+        });
+        transport.onHeartbeatError((err) => log(`heartbeat send failed: ${err.message || err}`));
+        transport.onSendError((err) => log(`send failed: ${err.message || err}`));
+      }
+
+      log(mode === 'operator' ? 'connecting to remote host over WebRTC ...' : `connecting via shared worker (${WORKER_URL}) ...`);
       try {
         await transport.connect();
       } catch (err) {
         log(`connect failed: ${err.message || err}`);
         transport = null;
+        bus?.close();
+        bus = null;
         connectBtn.disabled = false;
         return;
       }
       statusEl.textContent = 'connected';
       statusEl.className = 'connected';
-      log('connected — this tab is one of possibly several sharing the same worker connection');
 
-      // Every drive command — gamepad or manual — flows through this one
-      // subscription. There's exactly one place that calls drive.setVelocity.
+      if (mode === 'operator') {
+        // RtcTransport carries no heartbeat of its own — this tab owns it,
+        // exactly as the pre-Phase-4 dashboard did. This is the load-bearing
+        // choice: the heartbeat rides the operator's own link, so an
+        // operator that freezes or drops stops the robot ~300ms later.
+        heartbeat = startHeartbeat(transport, {
+          onSend: () => { sentCount++; hbSentCountEl.textContent = String(sentCount); },
+          onGap: (gap) => {
+            hbGapEl.textContent = `${gap.toFixed(0)}ms`;
+            log(`heartbeat send gap ${gap.toFixed(0)}ms (expected ~100ms)`);
+          },
+          onSendError: (err) => log(`heartbeat send failed: ${err.message || err}`),
+        });
+        log('connected — driving a remote robot over WebRTC; this tab owns the heartbeat');
+      } else {
+        log('connected — this tab is one of possibly several sharing the same worker connection');
+      }
+
       bus.subscribe(DRIVE_CMD_TOPIC, async ({ left, right }) => {
         cmdLeftEl.textContent = left.toFixed(2);
         cmdRightEl.textContent = right.toFixed(2);

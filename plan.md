@@ -175,6 +175,102 @@ macOS 크롬에서 탭 두 개로 테스트했다. `connection opened`는 한 �
 
 Phase 4의 통과 기준이 전부 충족됐다.
 
+## Phase 5 진행 — 원격 세션 (WebRTC), 시뮬레이터로 먼저
+
+다섯 번째 단계를 시작했다. 실제 두 번째 머신이나 하드웨어 없이, 지금까지 쓰던
+펌웨어 시뮬레이터를 그대로 두고(한 줄도 안 바꿨다 — WebRTC 계층은 전적으로
+브라우저 ↔ 브라우저 사이에 들어간다) 한 대에서 창 두 개로 전 구간을 붙였다.
+
+### 새로 만든 것
+
+- `apps/signaling-server` — SDP/ICE만 중계하는 최소 WebSocket 서버. robot id 하나당
+  "방" 하나를 두고, host 하나 + operator 여럿이 붙는다. `signal` 메시지는 방의
+  다른 피어에게 그대로 전달만 하고 내용은 보지 않는다. `list`는 Phase 6 플릿
+  레지스트리의 씨앗으로 넣어뒀고 아직 아무 데서도 안 쓴다. 포트 `SIGNALING_PORT`(9770).
+- `packages/rtc` — 세 조각이다.
+  - `SignalingClient` — 시그널링 서버의 피어 쪽 절반. 브라우저와 Node(22+ 전역
+    `WebSocket`) 양쪽에서 그대로 돈다.
+  - `RtcTransport` — operator 쪽. `WebSocketTransport`와 **똑같은 모양**
+    (`connect`/`send`/`onFrame`/`onDisconnect`)을 구현해서, 대시보드가 원격 로봇을
+    로컬 로봇과 완전히 같은 코드로 몬다 — transport 생성자만 바뀐다. Phase 4의
+    `HardwareBridgeClient`와 같은 수법을 한 홉 더 밖으로 민 것이다.
+  - `RtcHostBridge` — host 쪽. operator의 데이터채널과 펌웨어로 향하는 WebSocket
+    사이를 거의 그대로 지나가는 바이트 파이프. **하트비트를 절대 보내지 않고**,
+    ESTOP도 명령 검사도 안 한다. 펌웨어가 authority이고 이건 중계일 뿐이다.
+- `apps/dashboard/host.html` — host 브리지 콘솔. 조작 UI 없이 연결된 operator 목록과
+  양방향 바이트 카운트, 이벤트 로그만 보여준다.
+- `apps/dashboard/index.html`에 모드 선택 추가 — `local (shared worker)` /
+  `operator (remote WebRTC)`. transport 위쪽(`createDriveDevice`, `LocalBus`,
+  `TeleopNode`)은 두 모드가 동일하고, 하트비트 배선만 갈린다(아래).
+- `packages/transport/src/websocket-transport.js`에 `close()` 추가 — 인터페이스의
+  선택적 부분. `prototype-client.mjs`는 여전히 크래시 흉내를 위해 일부러 안 부르고,
+  host 브리지는 operator 세션 하나를 깔끔히 끝낼 때 쓴다.
+
+### 하트비트는 operator가 소유한다 (설계 결정)
+
+Phase 4에서는 SharedWorker가 하트비트를 보냈다. Phase 5 원격에서 그 모델을 그대로
+두면, operator의 랩탑이 얼거나 네트워크가 끊겨도 host가 대신 하트비트를 계속 보내서
+로봇이 마지막 속도로 계속 굴러가는 — 안전 모델을 정면으로 어기는 — 상황이 된다.
+그래서 원격에서는 하트비트가 반드시 operator 링크를 타야 한다. `RtcHostBridge`는
+하트비트를 전혀 안 보내고 순수 중계만 하며, operator 대시보드가 (Phase 3 이전처럼)
+`startHeartbeat(rtcTransport)`를 직접 돈다. operator가 끊기면 host로 하트비트가 안
+오고, host는 아무것도 전달 안 하고, 펌웨어 워치독이 ~300ms 뒤 스스로 모터를 0으로
+만든다 — USB 케이블을 뽑은 것과 같은 보장이, 이번엔 WebRTC 링크 너머에서.
+
+부수 효과: operator가 아무도 없으면 시뮬레이터는 하트비트를 못 받아 estop 상태로
+가만히 있는다. "아무도 몰지 않으면 멈춰 있다"가 맞으므로 의도된 동작이다.
+
+### operator 세션 하나당 펌웨어 WebSocket 하나
+
+시뮬레이터는 콜드 부팅 / ESTOP 이후의 안전 상태에서 **새 연결이 들어올 때만**
+빠져나온다(하트비트만으로는 재무장 안 함 — Phase 1에서 확인된 동작). host가 펌웨어로
+향하는 WebSocket 하나를 세션 내내 붙들고 있으면, 한 번 estop된 뒤 나중에 operator가
+붙어 하트비트를 보내도 시뮬레이터는 계속 estop 상태다. 그래서 `RtcHostBridge`는
+operator의 데이터채널이 열릴 때마다 펌웨어로 **새 WebSocket**을 열고, operator가
+떠나면 닫는다. "operator가 연결돼 있다" ↔ "펌웨어로 향하는 소켓이 열려 있다"를
+1:1로 묶어서 연결 → 주행 → 해제 → 재연결이 올바르게 돈다.
+
+실제 로봇 위의 host가 이렇게 동작해야 하는지(아니면 명시적 재무장 명령을 둬야
+하는지)는 아직 정하지 않은 항목으로 남긴다.
+
+### 지금까지 검증된 것 / 안 된 것
+
+- `scripts/signaling-smoke.mjs` — 시그널링 서버 + `SignalingClient`를 브라우저 없이
+  돌리는 스모크 테스트. 자체적으로 시그널링 서버를 띄우고, hello→ready,
+  peer-joined/peer-left, host↔operator 양방향 `signal` 중계(순서 보존 포함), 같은
+  robot에 두 번째 host 거부, `list` 응답을 확인한다. 8개 체크 전부 통과.
+  `RTCPeerConnection`은 Node에 없어서 여기서는 안 건드린다.
+- `RtcTransport` / `RtcHostBridge` / 두 HTML은 `node --check` 문법 검사만 했다.
+  실제 WebRTC 협상, 데이터채널, 그리고 Phase 5의 진짜 통과 기준(원격 조작 시
+  지연시간 실측, operator가 끊겼을 때 300ms ESTOP)은 사람이 실제 브라우저로
+  확인해야 한다.
+
+### 사람이 확인해줘야 하는 것
+
+한 대에서:
+
+1. 터미널 세 개 — `firmware/sim`(`npm start`), `web` 시그널링 서버
+   (`node apps/signaling-server/src/index.js`), `web` 정적 서버
+   (`node scripts/serve-dashboard.mjs`).
+2. `http://localhost:5173/apps/dashboard/host.html`를 열고 Start bridge.
+   시뮬레이터 로그에는 아직 아무 `connection opened`가 없어야 한다(host는 아직
+   펌웨어에 연결 안 함).
+3. 다른 창에서 `http://localhost:5173/apps/dashboard/index.html`를 열고 모드를
+   operator로, Connect. 이제 시뮬레이터 로그에 `connection opened`가 한 번 찍히고,
+   host 페이지의 바이트 카운터가 양방향으로 올라가야 한다.
+4. 슬라이더나 게임패드로 몬다 — 시뮬레이터 로그에 `velocity set`이 찍혀야 한다
+   (operator → 데이터채널 → host → 펌웨어).
+5. operator 창을 **닫는다** — 시뮬레이터 로그에 `connection closed` 후 ~300ms 뒤
+   `ESTOP`이 독자적으로 찍혀야 한다. 이게 Phase 5의 핵심: 조작하던 쪽이 사라지면
+   WebRTC 홉을 하나 거쳤든 아니든 펌웨어가 스스로 멈춘다.
+6. operator 창을 다시 열고 Connect — 다시 `connection opened`가 찍히고(새 세션 =
+   새 펌웨어 소켓 = 재무장) 정상 주행돼야 한다.
+
+지연시간과 NAT 통과는 이 한 대짜리 테스트로는 의미 있게 못 잰다(둘 다 host
+candidate, RTT ~0). 실제 두 번째 머신이 붙는 시점에 다시 확인한다.
+
 ## 아직 정하지 않은 것
 
 레퍼런스 하드웨어(현재는 디퍼렌셜 드라이브 로버 하나로 가정)와 정확한 커맨드 어휘는 실제 타겟 로봇이 정해지는 대로 다시 확정해야 한다. 매니페스트 스키마의 버전 관리 방식과, rtc 계층에서 WebRTC가 NAT 통과에 실패했을 때의 폴백(로컬 네트워크 안에서는 signaling-server를 거치는 일반 WebSocket 릴레이로 대체하는 방안을 고려 중)도 아직 세부 설계가 남아 있다.
+
+Phase 5에서 새로 생긴 미결 항목: (1) 실제 로봇 위의 host 브리지가 시뮬레이터처럼 "operator 세션마다 펌웨어 연결을 새로 여는" 모델로 가야 하는지, 아니면 펌웨어에 명시적 재무장(arm) 명령을 두고 host는 연결을 계속 유지하는 모델로 가야 하는지. (2) operator가 여럿 붙었을 때 누가 하트비트를 소유하고 누가 조작 권한을 갖는지(지금은 operator 1명 전제) — 조작권 중재(handover) 설계. (3) TURN 서버 운영 방식.

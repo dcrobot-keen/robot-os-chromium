@@ -1,6 +1,6 @@
 # 소스 코드 설명
 
-이 레포에 실제로 존재하는 코드 파일들을 하나씩 설명한다. 아키텍처 구상이 아니라 "지금 여기 있는 코드가 정확히 무엇을 하는가"를 남기는 문서다. `packages/rtc`와 `apps/signaling-server`만 아직 `package.json`뿐인 빈 자리이고, 나머지(`transport`, `bus`, `device-abstraction`, `nodes`, `scripts/`, `apps/dashboard`)는 전부 실제로 동작하는 코드다.
+이 레포에 실제로 존재하는 코드 파일들을 하나씩 설명한다. 아키텍처 구상이 아니라 "지금 여기 있는 코드가 정확히 무엇을 하는가"를 남기는 문서다. Phase 5까지 와서 이제 빈 자리는 없다 — `transport`, `bus`, `device-abstraction`, `nodes`, `rtc`, `apps/dashboard`, `apps/signaling-server`, `scripts/`가 전부 실제 코드다. 다만 `rtc`의 `RTCPeerConnection` 의존 부분(`RtcTransport`, `RtcHostBridge`)과 두 개의 새 HTML은 아직 `node --check` + 사람 검증 단계이고, `signaling-server`와 `SignalingClient`는 `scripts/signaling-smoke.mjs`로 자동 검증된다.
 
 ## package.json
 
@@ -20,7 +20,7 @@
 
 내부적으로 `FrameDecoder` 인스턴스를 하나 들고 있다가, `onmessage`로 바이너리 메시지(`ArrayBuffer`)가 들어올 때마다 `Uint8Array`로 바꿔서 디코더에 밀어넣고, 완성된 `{cmd, payload}` 프레임이 나오면 등록된 콜백들에 전달한다. WebSocket은 이미 메시지 단위로 배달해주기 때문에 TCP 때처럼 바이트가 쪼개져 오는 걱정은 없지만, 프레임 포맷 자체(CRC 검증 등)는 어차피 나중에 WebSerial(진짜 바이트 스트림)에서도 그대로 써야 하므로 굳이 다른 디코딩 경로를 따로 만들지 않고 `FrameDecoder`를 그대로 재사용했다.
 
-`connect()`는 `WebSocket`을 열고 `onopen`에서 resolve하는 프라미스를 반환하고, `onclose`가 오면 등록된 disconnect 콜백들을 부른다. `send()`는 그냥 `ws.send(frame)`이다 — 표준 `close()` 메서드는 항상 정상 종료 핸드셰이크를 보내기 때문에, "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지 자체를 죽여야 한다(아래 `prototype-client.mjs` 설명 참고).
+`connect()`는 `WebSocket`을 열고 `onopen`에서 resolve하는 프라미스를 반환하고, `onclose`가 오면 등록된 disconnect 콜백들을 부른다. `send()`는 그냥 `ws.send(frame)`이다. `close()`는 인터페이스의 선택적 부분으로, 정상 종료 핸드셰이크(WS close 프레임)를 보내는 의도적인 종료다 — "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지 자체를 죽여야 하고(`prototype-client.mjs`는 지금도 일부러 안 부른다), Phase 5의 `RtcHostBridge`는 operator 세션 하나를 깔끔히 끝낼 때 이걸 쓴다.
 
 ## packages/transport/src/heartbeat.js
 
@@ -64,9 +64,35 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 이후 실제 크롬 테스트에서 같은 값이 50ms가 아니라 500ms 이상 간격으로만 로그에 찍히는 현상이 나와서 원인을 조사했지만, 결과적으로 그 테스트는 애초에 게임패드가 연결되지 않은 상태에서 진행된 것이었다 — `connectedGamepad()`가 `null`을 반환하니 `_tick()`이 매번 조기 리턴했을 뿐, 로그에 찍힌 값은 화면 수동 슬라이더에서 온 것이었다. 즉 버그가 아니라 전제가 틀린 조사였다. 그래도 조사 과정에서 만든 `onTick(pad)` 콜백(매 폴링마다, 게임패드가 없어도 호출)과 대시보드의 `teleop ticks/s`/`gamepad seen/s`/`raw axes` 카운터는 남겨뒀는데, 실제로 도움이 됐다 — 진짜 게임패드로 재시도했을 때는 `velocity set`이 정확히 ~50ms 간격으로, 스틱을 중립에 두면 데드존대로 `left=0 right=0`이 찍히는 걸로 폴링과 발행 로직이 설계대로 동작한다는 게 확인됐다(`plan.md` "실제 게임패드로 재시도 — 통과" 참고). Phase 3의 게임패드 통과 기준은 이걸로 충족됐다.
 
-## packages/{rtc}/package.json, apps/{signaling-server}/package.json
+## apps/signaling-server/src/index.js
 
-이 두 곳만 아직 `package.json` 하나씩만 있는 빈 자리다. `description` 필드에 앞으로 뭘 담을지와 `plan.md`의 어느 단계(Phase 5)에서 채워질지를 적어뒀다.
+WebRTC 시그널링만 하는 최소 WebSocket 서버. robot id 하나가 "방" 하나이고, 방마다 host 하나 + operator 여럿이 붙는다. 클라이언트가 보내는 메시지는 세 가지뿐이다 — `hello`(role + robot id, host면 manifest도 옵션), `signal`(상대에게 그대로 넘길 불투명한 `data` 블롭), `list`(알려진 로봇 목록, Phase 6 씨앗). 서버는 `signal`의 `data` 안을 절대 들여다보지 않는다. `hello`에 대한 응답 `ready`에는 이미 방에 있던 피어 목록을 실어줘서, 새로 들어온 쪽이 WebRTC offer를 지금 보낼지 상대가 올 때까지 기다릴지 판단하게 한다. 같은 robot에 두 번째 host가 붙으면 거부한다. 포트는 `SIGNALING_PORT`(기본 9770). 로봇 명령·텔레메트리는 여기를 절대 지나가지 않는다 — 핸드셰이크가 끝나면 데이터채널로 P2P로 흐른다.
+
+## packages/rtc/src/signaling-client.js
+
+`apps/signaling-server`의 피어 쪽 절반. WebSocket 하나를 감싸서 서버의 JSON 메시지를 콜백(`onPeerJoined`/`onPeerLeft`/`onSignal`/`onClose`)으로 바꾼다. 전역 `WebSocket`만 써서 브라우저와 Node(22+) 양쪽에서 그대로 돈다 — 브라우저 대시보드와 `scripts/signaling-smoke.mjs`가 같은 클래스를 쓴다. `connect()`는 `ready`가 올 때 `{ peerId, peers }`로 resolve한다. WebRTC가 뭔지는 전혀 모르고, SDP/ICE를 나르는 `data`는 불투명하게 전달만 한다.
+
+## packages/rtc/src/rtc-transport.js
+
+원격 세션의 operator 쪽. `WebSocketTransport`와 똑같은 `connect`/`send`/`onFrame`/`onDisconnect` 모양을 구현해서, 대시보드가 원격 로봇을 로컬 로봇과 같은 코드로 몬다 — transport 생성자만 바뀐다(`HardwareBridgeClient`가 Phase 4에서 한 것과 같은 수법, 한 홉 더 밖). operator가 능동적인 쪽이라 `RTCPeerConnection`과 데이터채널을 만들고 offer를 보낸다(host는 answer만; 역할이 고정이라 perfect-negotiation 안 함). host가 이미 방에 있으면 바로 offer하고, 없으면 `peer-joined`를 기다린다. 들어오는 데이터채널 메시지는 `FrameDecoder`를 거쳐 `{cmd,payload}`로 나온다(`WebSocketTransport`와 같은 디코딩 경로 재사용).
+
+이 transport는 **자체 하트비트가 없다**. operator 대시보드가 `startHeartbeat(rtcTransport)`를 직접 돈다 — 하트비트가 operator 자신의 링크를 타야, operator가 얼거나 끊겼을 때 펌웨어 워치독이 ~300ms 뒤 모터를 0으로 만든다. host가 대신 하트비트를 보내면 이 보장이 깨진다. ICE 서버는 지금 공용 STUN 하나뿐이고, 크로스-NAT용 TURN과 LAN WebSocket 릴레이 폴백은 아직 미결(`plan.md` "아직 정하지 않은 것").
+
+## packages/rtc/src/rtc-host-bridge.js
+
+원격 세션의 host 쪽. 펌웨어에 닿을 수 있는 머신(여기서는 시뮬레이터에 닿는 머신)에서 돈다. 방에 나타나는 operator마다 WebRTC offer에 answer하고, 그 operator의 데이터채널과 펌웨어로 향하는 WebSocket 사이를 거의 그대로 지나가는 바이트 파이프가 된다 — operator→펌웨어는 raw 바이트 그대로(펌웨어의 `FrameDecoder`가 유효성 판정의 authority), 펌웨어→operator는 `{cmd,payload}`를 `encodeFrame`으로 다시 싸서 보낸다. **하트비트를 절대 안 보내고**, ESTOP도 명령 검사도 안 한다.
+
+operator 세션 하나당 펌웨어 WebSocket을 새로 연다. 시뮬레이터는 새 연결이 들어올 때만 estop 상태에서 재무장하기 때문에(하트비트만으로는 안 됨), "operator 연결됨" ↔ "펌웨어 소켓 열림"을 1:1로 묶어야 연결→주행→해제→재연결이 올바르게 돈다. operator가 떠나면 그 세션의 펌웨어 소켓을 `close()`로 깔끔히 닫는다. 실제 로봇 host가 이렇게 가야 하는지는 미결 항목.
+
+`RTCPeerConnection` 의존이라 Node에서는 못 돌린다 — `node --check`만 했고 실제 동작은 사람이 브라우저로 검증(`plan.md` Phase 5 "사람이 확인해줘야 하는 것").
+
+## packages/rtc/src/index.js
+
+`signaling-client.js`, `rtc-transport.js`, `rtc-host-bridge.js`를 재수출하고, 파일 맨 위 주석에 세 조각의 역할과 "무엇이 Node에서 돌고 무엇이 브라우저 전용인지"를 적어뒀다.
+
+## apps/dashboard/host.html
+
+host 브리지 콘솔. 조작 UI가 없다 — 시그널링/펌웨어/robot id 입력 필드, Start bridge 버튼, 연결된 operator 목록(각 행에 펌웨어 링크 상태와 양방향 바이트 카운트), 이벤트 로그가 전부다. `SignalingClient({role:'host'})` + `RtcHostBridge`를 만들어 `start()`할 뿐이고, 실제 중계 로직은 전부 `RtcHostBridge` 안에 있다. 페이지 상단에 "이 페이지는 로봇을 몰지 않고 하트비트도 안 보낸다"를 명시해뒀다.
 
 ## manifests/rover.manifest.json
 
@@ -85,6 +111,10 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 `close()`를 일부러 부르지 않는 게 핵심이다. WebSocket의 정상 종료는 양쪽이 종료 프레임을 주고받는 핸드셰이크인데, 실제 탭 크래시는 그런 인사를 할 겨를이 없다. 그래서 프로세스를 그냥 죽여서 OS가 강제로 소켓을 정리하게 만드는 쪽이 "크래시"를 더 정직하게 흉내낸다. 이 스크립트는 ESTOP이 실제로 발동했는지 스스로 확인하지 않는데, 4번 단계에서 프로세스가 완전히 죽어버리기 때문에 애초에 확인할 방법이 없고, 그게 이 테스트의 요점이다 — 정지가 실제로 일어났는지는 펌웨어(시뮬레이터) 쪽 로그에서, 이 프로세스가 죽고 한참 뒤의 타임스탬프로 확인해야 한다. 자세한 실행 결과와 재현 절차는 `plan.md`의 "Phase 1 검증 기록" 절에 남겨뒀다.
 
+## scripts/signaling-smoke.mjs
+
+`apps/signaling-server`와 `SignalingClient`를 브라우저 없이 검증하는 스모크 테스트. `RTCPeerConnection`은 Node에 없으므로 여기서는 안 건드리고, "랑데부"만 본다 — hello→ready, peer-joined/peer-left, 한 피어의 `signal` 블롭이 다른 피어에게 그대로(순서 보존 포함) 나오는지. SDP/ICE 페이로드는 가짜 문자열이다(서버가 안 들여다보므로). 자체적으로 던져버릴 포트에 시그널링 서버를 자식 프로세스로 띄우고, 8개 체크를 돌린 뒤 PASS/FAIL을 찍고 실패 시 non-zero로 종료한다. `node scripts/signaling-smoke.mjs`.
+
 ## scripts/serve-dashboard.mjs
 
 Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/dashboard/index.html`이 `<script type="module">`로 `packages/transport/src/*.js`를 상대 경로로 불러오는데, HTML 파일을 `file://`로 그냥 열면 크로미움이 모듈 스크립트 로딩을 CORS로 막아버리기 때문에 `http://`로 서빙해야 한다. `web/` 디렉터리 전체를 루트로 서빙하고, 확장자에 따라 `Content-Type`을 최소한으로만 맞춰준다(`.js`/`.mjs`는 `text/javascript`로 지정 — 이게 틀리면 브라우저가 모듈로 인식하지 않는다). 기본 포트는 5173, `DASHBOARD_PORT` 환경변수로 바꿀 수 있다.
@@ -98,6 +128,8 @@ Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/rover.manifes
 Phase 4에서는 `WebSocketTransport`를 직접 여는 대신 `HardwareBridgeClient`를 연다는 점만 바뀌었다. `createDriveDevice`는 두 경우 모두 같은 방식으로 호출되므로(둘 다 `HardwareTransport` 모양을 구현하기 때문에) 이 위의 배선 설명은 그대로 유효하다. 달라진 건 하트비트 관련 UI 갱신 방식이다 — 이전엔 이 탭이 직접 `startHeartbeat`를 불렀지만, 지금은 그 호출 자체가 워커 안으로 옮겨갔기 때문에 이 탭은 `transport.onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`로 워커가 보내주는 소식을 받아 화면 숫자만 갱신한다.
 
 게임패드 연결 상태는 `window`의 `gamepadconnected`/`gamepaddisconnected` 이벤트로 표시한다 — 참고로 Gamepad API 스펙상 실제로 게임패드의 버튼이나 스틱을 한 번 조작해야 브라우저가 그 게임패드를 "연결됨"으로 인식하는 브라우저가 많다(연결만 해두고 가만히 있으면 안 뜰 수 있음).
+
+Phase 5에서 모드 선택(`local` / `operator`)이 추가됐다. `local`은 지금까지대로 `HardwareBridgeClient`(SharedWorker)를 쓰고, `operator`는 `SignalingClient` + `RtcTransport`를 써서 원격 host 브리지에 WebRTC로 붙는다. transport 위쪽 배선(`createDriveDevice`, `LocalBus`, `TeleopNode`, 버스 구독)은 두 모드가 완전히 동일하고, 갈리는 건 하트비트뿐이다 — `local`은 워커가 하트비트를 소유하므로 이 탭은 `onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`를 듣기만 하고, `operator`는 `RtcTransport`에 하트비트가 없으므로 이 탭이 (Phase 4 이전처럼) `startHeartbeat`를 직접 돈다. 이게 load-bearing한 선택인 이유는 `plan.md` Phase 5 "하트비트는 operator가 소유한다" 절에 적어뒀다. `teardown()`은 두 모드 공통 정리(하트비트·teleop·bus 정지, transport null)를 한군데로 모은 것이다.
 
 이 페이지가 존재하는 이유는 단 하나, 지금까지의 모든 검증이 Node.js끼리의 통신이었고 실제 브라우저 탭은 이 흐름에 한 번도 들어온 적이 없었기 때문이다. `scripts/serve-dashboard.mjs`로 서빙한 뒤 `http://localhost:5173/apps/dashboard/index.html`로 열어야 한다.
 
