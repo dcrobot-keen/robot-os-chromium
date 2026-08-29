@@ -1,0 +1,6 @@
+# Files that run on the Linux robot must keep LF endings regardless of the
+# checkout platform — a CRLF in a shebang line is a "bad interpreter" error.
+*.sh              text eol=lf
+*.rules           text eol=lf
+*.service         text eol=lf
+deploy/**         text eol=lf
