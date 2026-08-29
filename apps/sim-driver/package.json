@@ -1,0 +1,16 @@
+{
+  "name": "@ros-chromium/sim-driver",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Glues the standalone simulator (../../../simulator) to pathfinder's closed-loop control relay: connects to the simulator's Roboteq (:8765) and sensor (:8766) endpoints like a real dashboard would, runs PathFollowerNode against the sensor stream's ground-truth pose, and relays that same pose to pathfinder's /api/live-pose so it shows on the real map too. Not a browser page -- everything it touches (WebSocketTransport, LocalBus) already runs unmodified in Node 22+.",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@ros-chromium/bus": "*",
+    "@ros-chromium/device-abstraction": "*",
+    "@ros-chromium/nodes": "*",
+    "@ros-chromium/transport": "*"
+  }
+}
