@@ -14,16 +14,14 @@
 // base (former-motor-protocol.md). roboteq.js holds the codec: encodeCommand
 // + the `cmd` builders + RoboteqDecoder.
 //
-// Implemented so far:
-//   - WebSocketTransport — global WebSocket; runs in a browser tab and in a
-//     Node.js test client. Stands in for WebSerialTransport until the real
-//     RS232 link to the Roboteq controller is wired up.
+// Implemented:
+//   - WebSocketTransport — global WebSocket; browser tab or Node client.
+//     Used to test against the firmware simulator.
+//   - WebSerialTransport — navigator.serial @ 115200 to /dev/ttyMOTOR, for
+//     the real Roboteq controller on the robot. Chromium only.
 //   - startHeartbeat — the "!B 3 1" keepalive loop (heartbeat.js).
-//
-// TODO:
-//   - WebSerialTransport — navigator.serial @ 115200 to /dev/ttyMOTOR
-//     (former-motor-protocol.md, "web/packages/transport → Roboteq 코덱").
 
 export * from './roboteq.js';
 export * from './websocket-transport.js';
+export * from './web-serial-transport.js';
 export * from './heartbeat.js';

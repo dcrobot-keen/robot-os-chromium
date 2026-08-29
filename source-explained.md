@@ -18,11 +18,19 @@ Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토�
 
 ## packages/transport/src/websocket-transport.js
 
-시뮬레이터 상대 테스트용 `HardwareTransport` 구현체(실제 보드는 같은 모양의 `WebSerialTransport`가 맡을 자리). 전역 `WebSocket`(브라우저 + Node 22+)만 써서 브라우저 탭에서도 Node 스크립트에서도 수정 없이 돈다 — `apps/dashboard/index.html`과 `scripts/prototype-client.mjs`가 같은 클래스를 쓴다.
+**시뮬레이터** 상대 테스트용 `HardwareTransport` 구현체. 전역 `WebSocket`(브라우저 + Node 22+)만 써서 브라우저 탭에서도 Node 스크립트에서도 수정 없이 돈다 — `apps/dashboard/index.html`(local 모드), `host.html`(simulator 모드), `scripts/*.mjs`가 같은 클래스를 쓴다.
 
-`RoboteqDecoder` 하나를 들고 있다가, `onmessage`로 바이트가 들어오면 (1) 먼저 raw 바이트 그대로 `onRaw` 콜백들에 넘기고 (2) 디코더에 밀어넣어 나온 파싱 메시지를 `onMessage` 콜백들에 넘긴다. `onRaw`는 파싱하지 않고 바이트만 중계해야 하는 곳(Phase 5 `RtcHostBridge`)을 위한 것이다.
+`RoboteqDecoder` 하나를 들고 있다가, `onmessage`로 바이트가 들어오면 (1) 먼저 raw 바이트 그대로 `onRaw` 콜백들에 넘기고 (2) 디코더에 밀어넣어 나온 파싱 메시지를 `onMessage` 콜백들에 넘긴다. `onRaw`는 파싱하지 않고 바이트만 중계해야 하는 곳(`RtcHostBridge`)을 위한 것이다.
 
 `connect()`는 `onopen`에서 resolve, `onclose`에서 disconnect 콜백. `send()`는 `ws.send(frame)`. `close()`는 인터페이스의 선택적 부분 — 정상 종료 핸드셰이크를 보내는 의도적 종료다. "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지를 죽여야 하고(`prototype-client.mjs`가 그렇게 한다), `RtcHostBridge`는 operator 세션을 깔끔히 끝낼 때 쓴다.
+
+## packages/transport/src/web-serial-transport.js
+
+**실제 Roboteq 컨트롤러** 상대 `HardwareTransport` 구현체 — `navigator.serial`로 로봇 자기 PC의 `/dev/ttyMOTOR`(115200 8N1)를 연다. `WebSocketTransport`와 완전히 같은 모양(`connect`/`send`/`onMessage`/`onRaw`/`onDisconnect`/`close`)이라 `RtcHostBridge`·`createDriveDevice`는 둘 중 뭘 받든 상관 안 한다. Chromium 전용 + secure context(localhost 포함) 필요. Node에서 못 돌려서 `node --check`만, 실검증은 로봇에서 사람이.
+
+`connect()`: 이미 승인된 포트가 정확히 하나면 그걸 재사용(재부팅 후 프롬프트 없음), 아니면 `navigator.serial.requestPort()`로 피커를 띄운다 — `filters`(Former FTDI 어댑터 `0x0403`/`0x6001`)로 피커를 좁힌다. 열고 나서 `writable.getWriter()`로 쓰고, `readable.getReader()`를 돌리는 `_readLoop()`가 들어온 청크를 `onRaw` → `RoboteqDecoder` → `onMessage` 순으로 흘린다. 포트 물리적 분리는 `disconnect` 이벤트로, 스트림 종료/에러는 read 루프의 `finally`에서 `onDisconnect`로 통지. `close()`는 reader cancel → writer close → port close 순.
+
+매 부팅 프롬프트를 없애려면 엔터프라이즈 정책 `SerialAllowUsbDevicesForUrls`(대시보드 origin + FTDI VID/PID)를 깔아야 한다. 이 파일에도 그 주석이 있다.
 
 ## packages/transport/src/heartbeat.js
 
@@ -30,7 +38,7 @@ Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토�
 
 ## packages/transport/src/index.js
 
-`roboteq.js`, `websocket-transport.js`, `heartbeat.js`를 재수출한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스 모양(`connect`/`send`/`onMessage`/`onDisconnect`, 선택적 `onRaw`/`close`)과 와이어 프로토콜이 Roboteq라는 것, 다음 TODO가 `navigator.serial` 기반 `WebSerialTransport`(`/dev/ttyMOTOR` @ 115200)라는 걸 적어뒀다. 그 위 코드(device-abstraction, nodes, dashboard)는 transport 구현을 갈아끼워도 안 건드리는 게 이 인터페이스를 둔 이유다.
+`roboteq.js`, `websocket-transport.js`, `web-serial-transport.js`, `heartbeat.js`를 재수출한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스 모양(`connect`/`send`/`onMessage`/`onDisconnect`, 선택적 `onRaw`/`close`)과 와이어 프로토콜이 Roboteq라는 것, 그리고 두 구현체(`WebSocketTransport` = 시뮬레이터, `WebSerialTransport` = 실기)를 적어뒀다. 그 위 코드(device-abstraction, nodes, dashboard)는 transport 구현을 갈아끼워도 안 건드리는 게 이 인터페이스를 둔 이유다.
 
 ## packages/bus/src/local-bus.js
 
@@ -88,9 +96,11 @@ WebRTC 시그널링만 하는 최소 WebSocket 서버. robot id 하나가 "방" 
 
 ## packages/rtc/src/rtc-host-bridge.js
 
-원격 세션의 host 쪽. 펌웨어에 닿을 수 있는 머신(여기서는 시뮬레이터에 닿는 머신)에서 돈다. 방에 나타나는 operator마다 WebRTC offer에 answer하고, 그 operator의 데이터채널과 펌웨어로 향하는 WebSocket 사이를 **양방향 모두 raw 바이트 그대로** 지나가는 파이프가 된다 — `transport.onRaw`를 쓰지 파싱된 `onMessage`를 안 쓴다. **keepalive를 절대 안 보내고**, ESTOP도 트래픽 파싱도 안 한다. 유효성 판정은 펌웨어의 디코더가 authority.
+원격 세션의 host 쪽. 로봇 자기 PC(또는 시뮬레이터에 닿는 아무 머신)에서 돈다. 방에 나타나는 operator마다 WebRTC offer에 answer하고, 그 operator의 데이터채널과 컨트롤러로 향하는 transport 사이를 **양방향 모두 raw 바이트 그대로** 지나가는 파이프가 된다 — `transport.onRaw`를 쓰지 파싱된 `onMessage`를 안 쓴다. **keepalive를 절대 안 보내고**, ESTOP도 트래픽 파싱도 안 한다.
 
-operator 세션 하나당 펌웨어 WebSocket을 새로 연다. 펌웨어는 새 연결이 들어올 때(또는 operator가 보낸 `!MG`)만 정지 상태에서 재무장하기 때문에, "operator 연결됨" ↔ "펌웨어 소켓 열림"을 1:1로 묶어야 연결→주행→해제→재연결이 올바르게 돈다. operator가 떠나면 그 세션의 펌웨어 소켓을 `close()`로 깔끔히 닫는다. 실제 로봇 host가 이렇게 가야 하는지는 미결 항목.
+생성자가 `firmwareUrl` 문자열 대신 `makeTransport` 팩토리(`() => HardwareTransport`)와 `initCommands`(문자열 배열)를 받도록 바뀌었다. 그래서 같은 브리지가 `WebSocketTransport`(시뮬레이터)든 `WebSerialTransport`(실기 Roboteq)든 그대로 앞단다. **딱 하나의 예외**: 컨트롤러에 연결한 직후 `initCommands`(매니페스트의 `drive.commands.init` — 실기 Roboteq면 `^ECHOF 1`/`!R 2`/`!AC`/`!DC`, 시뮬레이터면 빈 배열)를 100ms 간격으로 보낸다. 이건 컨트롤러 bring-up이지 주행이 아니라서 예외로 뒀다.
+
+operator 세션 하나당 transport를 새로 연다. 컨트롤러는 새 연결(또는 `!MG`) 때만 정지 상태에서 재무장하므로 "operator 연결됨" ↔ "transport 열림"을 1:1로 묶어야 연결→주행→해제→재연결이 맞는다. operator가 떠나면 그 세션의 transport를 `close()`. **주의**: 실제 시리얼 포트는 배타적이라 operator 2명 이상이면 브리지가 transport 하나를 공유해야 한다(SharedWorker가 탭에 해주듯) — Phase 5는 operator 1명 전제라 범위 밖.
 
 `RTCPeerConnection` 의존이라 Node에서는 못 돌린다 — `node --check`만 했고 실제 동작은 사람이 브라우저로 검증(`plan.md` Phase 5 "사람이 확인해줘야 하는 것").
 
@@ -100,11 +110,11 @@ operator 세션 하나당 펌웨어 WebSocket을 새로 연다. 펌웨어는 새
 
 ## apps/dashboard/host.html
 
-host 브리지 콘솔. 조작 UI가 없다 — 시그널링/펌웨어/robot id 입력 필드, Start bridge 버튼, 연결된 operator 목록(각 행에 펌웨어 링크 상태와 양방향 바이트 카운트), 이벤트 로그가 전부다. `SignalingClient({role:'host'})` + `RtcHostBridge`를 만들어 `start()`할 뿐이고, 실제 중계 로직은 전부 `RtcHostBridge` 안에 있다. 페이지 상단에 "이 페이지는 로봇을 몰지 않고 keepalive도 안 보낸다"를 명시해뒀다.
+host 브리지 콘솔. 조작 UI가 없다 — **Controller 모드 라디오(simulator / hardware)**, 시그널링/sim URL/robot id 입력, Start bridge 버튼, 연결된 operator 목록(펌웨어 링크 상태 + 양방향 바이트), 이벤트 로그가 전부다. simulator 모드면 `makeTransport = () => new WebSocketTransport(fwUrl)`(init 없음), hardware 모드면 `() => new WebSerialTransport({ baudRate, filters })` + 매니페스트의 `drive.commands.init`을 `initCommands`로 넘긴다. `SignalingClient({role:'host'})` + `RtcHostBridge(sig, makeTransport, { initCommands, onEvent })`를 만들어 `start()`할 뿐이고, 실제 중계는 전부 `RtcHostBridge` 안. 페이지 상단에 "몰지 않고 keepalive도 안 보낸다(단 bring-up 명령은 보냄)"를 명시.
 
 ## manifests/former.manifest.json
 
-Former 2.0을 기술하는 매니페스트 — 이제 `createDriveDevice`가 실제로 소비하는 데이터다. `drive.commands`(`enable`/`estop`/`setVelocity` 템플릿 문자열), `drive.channels`(`{left:1, right:2}`), `drive.scale`(1000)이 주행 동작을 완전히 규정한다. `drive.geometry`(바퀴 반지름/축거/`countsPerRev`/`maxWheelRpm`)와 `drive.readback`(`?C`/`?V 2`/`?A`/`?T 1`/`?FF`/`?DI` 쿼리 매핑)은 아직 문서/향후 용도. `base: "roboteq"`, `transport`(kind/baud/device)도 지금은 참고용. 이전 이름은 `rover.manifest.json`(가상의 rover-01). `scripts/prototype-client.mjs`와 `scripts/roboteq-smoke.mjs`도 이 파일을 그대로 읽어 쓴다(dogfooding).
+Former 2.0을 기술하는 매니페스트 — 이제 실제로 소비된다. `drive.commands`: `init`(실기 Roboteq bring-up 시퀀스 `["^ECHOF 1", "!R 2", "!AC 1 6000_!AC 2 6000", "!DC 1 6000_!DC 2 6000"]` — 값 6000은 레퍼런스 ROS 드라이버의 `robot_acceleration`/`robot_deceleration`), `enable`/`estop`/`setVelocity` 템플릿 문자열. `drive.channels`(`{left:1, right:2}`), `drive.scale`(1000)이 `createDriveDevice`의 주행 동작을 규정하고, `drive.commands.init`은 `host.html` hardware 모드가 읽어 `RtcHostBridge`의 `initCommands`로 넘긴다. `transport.baud`(115200)는 `WebSerialTransport` 보드레이트. `drive.geometry`와 `drive.readback`은 아직 향후 용도. 이전 이름은 `rover.manifest.json`. 두 Node 스크립트도 이 파일을 그대로 읽는다(dogfooding).
 
 ## scripts/prototype-client.mjs
 
@@ -120,7 +130,7 @@ Former 2.0을 기술하는 매니페스트 — 이제 `createDriveDevice`가 실
 
 ## scripts/roboteq-smoke.mjs
 
-Roboteq 라인 프로토콜 전 구간을 브라우저 없이 검증하는 스모크 테스트 — `WebSocketTransport` + `roboteq.js` 코덱 + 시뮬레이터의 Roboteq 에뮬레이터 + `createDriveDevice`, 그리고 load-bearing한 RWD 워치독. 자체적으로 시뮬레이터를 짧은 `SIM_RWD_MS`로 자식 프로세스로 띄우고 7개 체크(`?FID` 응답, `!MG` 전엔 `!G` 무시, `!MG` 후 엔코더 증가, `+` ack, `!EX` 후 `FF=16`/`DI=0` 래치, 침묵 시 RWD 정지)를 돌린 뒤 PASS/FAIL, 실패 시 non-zero 종료. `node scripts/roboteq-smoke.mjs`.
+Roboteq 라인 프로토콜 전 구간을 브라우저 없이 검증하는 스모크 테스트 — `WebSocketTransport` + `roboteq.js` 코덱 + 시뮬레이터의 Roboteq 에뮬레이터 + `createDriveDevice`, 그리고 load-bearing한 RWD 워치독. 자체적으로 시뮬레이터를 짧은 `SIM_RWD_MS`로 자식 프로세스로 띄우고 8개 체크(`?FID` 응답, 매니페스트 `drive.commands.init` 시퀀스 전부 `+` ack, `!MG` 전엔 `!G` 무시, `!MG` 후 엔코더 증가, `+` ack, `!EX` 후 `FF=16`/`DI=0` 래치, 침묵 시 RWD 정지)를 돌린 뒤 PASS/FAIL, 실패 시 non-zero 종료. `node scripts/roboteq-smoke.mjs`.
 
 ## scripts/signaling-smoke.mjs
 

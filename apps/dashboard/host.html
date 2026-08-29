@@ -22,21 +22,26 @@
 <body>
   <h1>former-01 host bridge — Phase 5</h1>
   <p>
-    This page runs on the machine that can reach the firmware. It registers as the robot's
-    <code>host</code> with the signaling server and then relays bytes between each remote
-    <code>operator</code>'s WebRTC data channel and a WebSocket to the firmware. It does
-    <strong>not</strong> drive the robot and <strong>never sends the keepalive</strong> — the operator
-    owns it, so if an operator drops, the Roboteq serial watchdog zeroes the motors on its own
-    ~1s later. Open <code>index.html</code> in operator mode (same machine is fine for a first test)
-    to connect to this bridge.
+    Runs on the machine connected to the robot (the Former's own PC), or any machine that can reach
+    the simulator. Registers as the robot's <code>host</code> with the signaling server, then relays
+    bytes between each remote <code>operator</code>'s WebRTC data channel and a transport to the
+    controller. It does <strong>not</strong> drive the robot and <strong>never sends the
+    keepalive</strong> — the operator owns it, so if an operator drops, the Roboteq serial watchdog
+    zeroes the motors on its own ~1s later. (It does send the manifest's controller bring-up commands
+    once per connect.)
   </p>
 
   <div class="row">Bridge: <span id="status" class="off">stopped</span></div>
   <div class="row">
-    <label>signaling <input id="sigUrl" type="text" value="ws://127.0.0.1:9770" /></label>
+    Controller:
+    <label><input type="radio" name="fw" value="sim" checked /> simulator (WebSocket)</label>
+    <label><input type="radio" name="fw" value="serial" /> hardware (WebSerial)</label>
   </div>
   <div class="row">
-    <label>firmware &nbsp;<input id="fwUrl" type="text" value="ws://127.0.0.1:8765" /></label>
+    <label>signaling <input id="sigUrl" type="text" value="ws://127.0.0.1:9770" /></label>
+  </div>
+  <div class="row" id="fwUrlRow">
+    <label>sim URL &nbsp;<input id="fwUrl" type="text" value="ws://127.0.0.1:8765" /></label>
   </div>
   <div class="row">
     <label>robot id &nbsp;&nbsp;<input id="robotId" type="text" value="former-01" /></label>
@@ -53,13 +58,22 @@
 
   <script type="module">
     import { loadManifest } from '../../packages/device-abstraction/src/index.js';
+    import { WebSocketTransport, WebSerialTransport } from '../../packages/transport/src/index.js';
     import { SignalingClient, RtcHostBridge } from '../../packages/rtc/src/index.js';
 
     const statusEl = document.getElementById('status');
     const logEl = document.getElementById('log');
     const startBtn = document.getElementById('startBtn');
     const opsBody = document.querySelector('#ops tbody');
+    const fwUrlRow = document.getElementById('fwUrlRow');
     const MANIFEST_URL = '/manifests/former.manifest.json';
+    // Former's motor adapter — narrows the WebSerial port picker.
+    const SERIAL_FILTERS = [{ usbVendorId: 0x0403, usbProductId: 0x6001 }];
+
+    const fwModeOf = () => document.querySelector('input[name="fw"]:checked').value;
+    for (const r of document.querySelectorAll('input[name="fw"]')) {
+      r.addEventListener('change', () => { fwUrlRow.hidden = fwModeOf() !== 'sim'; });
+    }
 
     function log(msg) {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -90,6 +104,7 @@
       const sigUrl = document.getElementById('sigUrl').value.trim();
       const fwUrl = document.getElementById('fwUrl').value.trim();
       const robot = document.getElementById('robotId').value.trim();
+      const fwMode = fwModeOf();
 
       let manifest = null;
       try {
@@ -99,6 +114,20 @@
         log(`no manifest (${err.message || err}) — registering without one`);
       }
 
+      // sim: multiple WebSocket connections are fine. hardware: WebSerial to
+      // the real Roboteq, plus the manifest's ^ECHOF 1 / !R 2 / !AC / !DC
+      // bring-up. (init is empty/harmless against the sim.)
+      let makeTransport, initCommands = [];
+      if (fwMode === 'serial') {
+        const baud = manifest?.transport?.baud ?? 115200;
+        makeTransport = () => new WebSerialTransport({ baudRate: baud, filters: SERIAL_FILTERS });
+        initCommands = manifest?.drive?.commands?.init ?? [];
+        log(`hardware mode — WebSerial @ ${baud}, ${initCommands.length} init command(s)`);
+      } else {
+        makeTransport = () => new WebSocketTransport(fwUrl);
+        log(`simulator mode — ${fwUrl}`);
+      }
+
       const sig = new SignalingClient(sigUrl, { role: 'host', robot, manifest });
       sig.onClose(() => {
         statusEl.textContent = 'signaling closed';
@@ -106,7 +135,8 @@
         log('signaling connection closed');
       });
 
-      bridge = new RtcHostBridge(sig, fwUrl, {
+      bridge = new RtcHostBridge(sig, makeTransport, {
+        initCommands,
         onEvent: (e) => {
           switch (e.type) {
             case 'started':

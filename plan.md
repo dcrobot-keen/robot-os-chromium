@@ -319,6 +319,20 @@ candidate, RTT ~0). 실제 두 번째 머신이 붙는 시점에 다시 확인�
 WebRTC 실동작은 여전히 사람이 브라우저로 확인해야 한다(Phase 5 절 "사람이
 확인해줘야 하는 것", robot id만 `former-01`로).
 
+### WebSerialTransport + host.html 하드웨어 모드
+
+`WebSerialTransport`(`navigator.serial` @ 115200, `/dev/ttyMOTOR`, `WebSocketTransport`와
+동일 인터페이스) 구현. Chromium 전용이라 `node --check`만, 실검증은 로봇에서.
+`RtcHostBridge` 생성자를 `firmwareUrl` 문자열 → `makeTransport` 팩토리 +
+`initCommands`로 바꿔서 같은 브리지가 시뮬레이터(WebSocket)와 실기(WebSerial)를 다
+앞단다. `host.html`에 Controller 라디오(simulator / hardware) 추가 — hardware면
+WebSerial 팩토리 + 매니페스트의 `drive.commands.init`(`^ECHOF 1`/`!R 2`/`!AC`/`!DC`)을
+컨트롤러 연결 직후 100ms 간격으로 전송(bring-up만, 주행 아님). init 시퀀스는
+시뮬레이터에서도 무해(전부 `+` ack) — `roboteq-smoke.mjs`에 체크 추가(이제 8/8).
+
+이걸로 "로봇에 설치" 경로의 코드 공백은 메워졌다. 남은 건 배포 절차(Debian 준비,
+ROS `former_bringup` 정지, systemd 자동실행, WebSerial 권한 영속화)와 실기 검증뿐.
+
 ### 매니페스트 주도로 전환
 
 `createDriveDevice`에서 Roboteq 하드코딩(`!G`/`!MG`/`!EX`, 스케일)을 걷어내고

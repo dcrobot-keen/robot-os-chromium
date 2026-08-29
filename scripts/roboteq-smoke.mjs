@@ -44,11 +44,21 @@ try {
   await transport.connect();
 
   const drive = createDriveDevice(transport, manifest);
+  const enc = new TextEncoder();
 
   // --- ?FID handshake --------------------------------------------------
-  await transport.send(new TextEncoder().encode('?FID\r'));
+  await transport.send(enc.encode('?FID\r'));
   await wait(50);
   check('?FID returns a FID= line', replies.some((m) => m.type === 'reply' && m.key === 'FID'));
+
+  // --- manifest init sequence is all accepted -----------------------
+  const initCmds = manifest.drive.commands.init;
+  const expectedAcks = initCmds.reduce((n, line) => n + line.split('_').length, 0);
+  const ackBefore = replies.filter((m) => m.type === 'ack' && m.ok).length;
+  for (const line of initCmds) { await transport.send(enc.encode(line + '\r')); await wait(30); }
+  await wait(50);
+  const ackAfter = replies.filter((m) => m.type === 'ack' && m.ok).length;
+  check('every init sub-command is "+"-acked', ackAfter - ackBefore === expectedAcks);
 
   // --- !G ignored until !MG ------------------------------------------
   await drive.setVelocity(0.5, 0.5);

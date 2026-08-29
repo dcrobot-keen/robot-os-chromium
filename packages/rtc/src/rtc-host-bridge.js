@@ -1,37 +1,49 @@
 // RtcHostBridge — the host side of a remote session. Runs on the machine
-// that is physically connected to the robot (here: the machine that can
-// reach the firmware simulator). For each operator that shows up in the
-// room it answers the WebRTC offer, then acts as a near-transparent byte
-// pipe between that operator's data channel and a WebSocket to the
-// firmware:
+// connected to the robot (the Former's own PC), or any machine that can
+// reach the firmware simulator. For each operator that shows up in the room
+// it answers the WebRTC offer, then acts as a transparent byte pipe — both
+// directions, undecoded — between that operator's data channel and a
+// HardwareTransport to the controller:
 //
-//   operator data channel  <--raw bytes-->  firmware
+//   operator data channel  <--raw bytes-->  controller
+//
+// The transport comes from the `makeTransport` factory passed in, so the
+// same bridge fronts a WebSocketTransport (the sim) or a WebSerialTransport
+// (the real Roboteq on /dev/ttyMOTOR) unchanged.
 //
 // What it deliberately does NOT do:
 //   - It never sends the keepalive. The operator owns it (see
 //     rtc-transport.js). If the operator drops, the Roboteq serial
 //     watchdog stops the motors on its own ~1s later.
-//   - It never issues ESTOP or parses traffic. The firmware is the
-//     authority; this is just a relay (uses transport.onRaw, not onMessage).
+//   - It never issues ESTOP or parses operator traffic — relay only
+//     (transport.onRaw, not onMessage).
+//   - The one exception: right after connecting it sends `initCommands`
+//     (from the manifest — ^ECHOF 1 / !R 2 / !AC / !DC for a real Roboteq,
+//     empty for the sim). That's controller bring-up, not driving.
 //
-// One firmware WebSocket per operator session. The firmware only re-arms
-// out of its post-watchdog / post-ESTOP safe state on a *new* connection
-// (a !MG from the operator also does it), so mapping "an operator is
-// connected" to "a WebSocket to the firmware is open" keeps connect ->
-// drive -> disconnect -> reconnect correct.
-// Whether the real on-robot host should behave the same way — or expose an
-// explicit re-arm — is an open item (plan.md Phase 5).
+// One transport per operator session — the controller re-arms out of its
+// post-watchdog / post-ESTOP state on a *new* connection (a !MG also does
+// it), so "operator connected" <-> "transport open" keeps connect -> drive
+// -> disconnect -> reconnect correct. NOTE: a real serial port is
+// exclusive, so 2+ simultaneous operators would need the bridge to hold ONE
+// shared transport (like the SharedWorker does for tabs) — out of scope
+// while Phase 5 is single-operator (plan.md).
 
-import { WebSocketTransport } from '../../transport/src/websocket-transport.js';
+import { encodeCommand } from '../../transport/src/roboteq.js';
 
 const DEFAULT_RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 export class RtcHostBridge {
-  constructor(signalingClient, firmwareUrl, { rtcConfig = DEFAULT_RTC_CONFIG, onEvent } = {}) {
+  // makeTransport: () => HardwareTransport (a fresh one per operator session)
+  // initCommands: string[] — Roboteq lines sent once after each connect
+  constructor(signalingClient, makeTransport, { rtcConfig = DEFAULT_RTC_CONFIG, initCommands = [], onEvent } = {}) {
     this._sig = signalingClient;
-    this._firmwareUrl = firmwareUrl;
+    this._makeTransport = makeTransport;
+    this._initCommands = initCommands;
     this._rtcConfig = rtcConfig;
     this._onEvent = onEvent || (() => {});
     // operator peerId -> { pc, dc, firmware, bytesToFirmware, bytesToOperator }
@@ -79,9 +91,9 @@ export class RtcHostBridge {
     dc.binaryType = 'arraybuffer';
 
     dc.onopen = async () => {
-      // Fresh WebSocket to the firmware for this operator session — this is
-      // the "connection" the firmware watchdog re-arms on.
-      const firmware = new WebSocketTransport(this._firmwareUrl);
+      // Fresh transport to the controller for this operator session — this
+      // is the "connection" the watchdog re-arms on.
+      const firmware = this._makeTransport();
       session.firmware = firmware;
       firmware.onRaw((bytes) => {
         if (session.dc?.readyState === 'open') {
@@ -92,6 +104,12 @@ export class RtcHostBridge {
       firmware.onDisconnect(() => this._closeSession(operatorId, 'firmware connection closed'));
       try {
         await firmware.connect();
+        // Controller bring-up (Roboteq: ^ECHOF 1 / !R 2 / !AC / !DC). Spaced
+        // like the reference ROS driver; skipped when initCommands is empty.
+        for (const line of this._initCommands) {
+          await firmware.send(encodeCommand(line));
+          await sleep(100);
+        }
         this._onEvent({ type: 'firmware-connected', operatorId });
       } catch (err) {
         this._onEvent({ type: 'firmware-error', operatorId, message: err.message || String(err) });

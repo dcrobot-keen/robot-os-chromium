@@ -7,6 +7,7 @@
     "channels": { "left": 1, "right": 2 },
     "scale": 1000,
     "commands": {
+      "init": ["^ECHOF 1", "!R 2", "!AC 1 6000_!AC 2 6000", "!DC 1 6000_!DC 2 6000"],
       "enable": "!MG",
       "estop": "!EX",
       "setVelocity": "!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"
