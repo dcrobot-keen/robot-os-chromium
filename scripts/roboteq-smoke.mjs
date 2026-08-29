@@ -15,7 +15,7 @@ import { WebSocketTransport } from '../packages/transport/src/index.js';
 import { createDriveDevice } from '../packages/device-abstraction/src/drive-device.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const SIM = resolve(here, '../../firmware/sim/src/index.js');
+const SIM = resolve(here, '../../robot-base/sim/src/index.js');
 const manifest = JSON.parse(await readFile(new URL('../manifests/former.manifest.json', import.meta.url)));
 const PORT = 8791;
 const RWD_MS = 400;

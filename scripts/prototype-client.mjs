@@ -5,7 +5,7 @@
 // the real-browser version.
 //
 // Run in two terminals:
-//   1) node ../firmware/sim/src/index.js          (or: SIM_RWD_MS=400 node ...)
+//   1) node ../robot-base/sim/src/index.js         (or: SIM_RWD_MS=400 node ...)
 //   2) node scripts/prototype-client.mjs
 //
 // What it does: connects the way a tab does, enables the motors (!MG),
