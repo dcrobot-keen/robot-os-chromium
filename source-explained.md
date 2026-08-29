@@ -88,7 +88,22 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 ## packages/nodes/src/planner-node.js
 
-`PlannerNode` — roadmap.md Phase 7의 "PlannerNode: 격자 A* → path"를 위 `planner-wasm`으로 구현. `requestTopic`을 구독해 `{ requestId, ...findPathRequest }`를 받으면 WASM 호출 결과(또는 에러)를 `{ requestId, path, distance }`(또는 `{ requestId, error }`) 형태로 `pathTopic`에 발행한다. 격자를 스스로 만들지 않는다는 점이 중요 — LIDAR 스캔에서 격자를 누적하는 `MapNode`도, 경로를 `cmd_vel`로 바꾸는 `PathFollowerNode`도 아직 없어서(둘 다 roadmap.md Phase 7의 나머지 항목), 지금은 요청에 격자를 통째로 실어 보내야 한다.
+`PlannerNode` — roadmap.md Phase 7의 "PlannerNode: 격자 A* → path"를 위 `planner-wasm`으로 구현. `requestTopic`을 구독해 `{ requestId, ...findPathRequest }`를 받으면 WASM 호출 결과(또는 에러)를 `{ requestId, path, distance }`(또는 `{ requestId, error }`) 형태로 `pathTopic`에 발행한다. 격자를 스스로 만들지 않고 요청에 실려 오는 격자를 그대로 쓴다 — 그 격자를 LIDAR 스캔에서 만드는 건 `MapNode`(아래), `path`를 `cmd_vel`로 바꾸는 건 `PathFollowerNode`(커밋 `60bf0b0`)의 몫.
+
+## packages/nodes/src/map-node.js
+
+`MapNode` — roadmap.md Phase 7의 마지막 노드. `scanTopic`(LaserScan 형태 `{ angleMin, angleIncrement, rangeMin, rangeMax, ranges }`)과 `poseTopic`(`{x,y,theta}` — `OdometryNode`/`PoseFusionNode`가 주거나 sim ground truth)을 구독해, 마지막으로 본 pose에서 각 스캔을 점유격자에 rasterize하고 `mapTopic`에 발행한다. 출력 객체는 `@ros-chromium/planner-wasm`의 `findPath` 요청 / pathfinder `grid.NewGridFromOccupancy`에 그대로 넣는 형태: `{ originX, originY, cellSize, cols, rows, occupied, occupiedInflated, updatedAt }`. `occupied`/`occupiedInflated`는 row-major `bool[]`(`row*cols+col`), 원점은 최소 코너, `col=floor((x-originX)/cellSize)` — 전부 `pathfinder/grid/grid.go`의 `CellAt`/`index`와 바이트 단위로 동일(안 그러면 계획된 경로가 벽과 어긋남).
+
+설계 결정:
+- **hit/miss 집계**(log-odds 아님 — 그건 Phase 8). 빔마다 Amanatides–Woo 격자 순회(`castRayCells`): 지나간 셀은 `misses++`, 끝 셀은 `hits++`(단, `range >= rangeMax`인 "no return" 빔은 끝 셀도 miss). `thresholdOccupancy`가 `hits >= minHits`(기본 2) & `hits/(hits+misses) >= occRatio`(기본 0.2)로 이진화. 미관측 셀은 free.
+- **`occupiedInflated` = `occupied`를 로봇 body 반경만큼 원형 팽창**(`inflateOccupancy`). pathfinder A*는 로봇을 점으로 보고 인플레이션 단계가 없으므로, PlannerNode 요청엔 이 팽창본을 `occupied`로 넣어야 벽을 스치지 않는다. 원본은 표시용 + Phase 8 누적용으로 보존.
+- **현재 pose 셀은 강제 free**(`clearDisc`). 로봇이 벽에 바싹 붙어 팽창 벽이 자기 셀을 덮으면 플래너가 `"start point is inside an obstacle"`로 전 요청을 거부하기 때문.
+- TF가 없으므로 pose·scan을 명시적 bus 입력으로 받아 `world = pose ⊕ (range, angle)` 변환을 직접 한다.
+- 스캔마다 발행하지 않고 `publishHz`(기본 2) 타이머로, 마지막 발행 후 스캔이 하나라도 들어왔을 때만. `snapshot()`으로 동기 조회 가능(테스트용).
+
+## scripts/map-node-smoke.mjs
+
+`MapNode`를 브라우저·시뮬레이터 없이 검증(26개 체크). 격자 기하가 `grid.go`의 `Bounds`/`CellAt`와 일치하는지, `castRayCells`가 시작 셀→끝 셀을 빠짐없이 걷는지, hit/miss 임계값·팽창·`clearDisc`가 맞는지 단위 검증하고, 마지막에 합성 360빔 방 스캔을 넣어 네 벽이 occupied로 잡히고 실내가 free인지, 팽창이 벽을 안쪽으로 두껍게 만드는지 확인한 뒤, **발행된 격자를 실제 `planner-wasm`에 넣어** 방을 가로지르는 경로가 나오고 팽창 벽 안쪽 목표는 거부되는지까지 왕복한다. `node scripts/map-node-smoke.mjs`.
 
 ## scripts/planner-wasm-smoke.mjs
 

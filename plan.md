@@ -394,7 +394,7 @@ RWD 워치독 체크도 다시 봤다: 기존 코드는 `!G`를 마지막으로 
 - 이 저장소에 `packages/planner-wasm`(vendor/에 빌드 산출물 커밋 — `robot-base`의 `roboteq.js`처럼 두 저장소가 파일시스템 경로를 공유하지 않는 원칙 유지, `scripts/refresh-vendor.mjs`로 갱신) + `packages/nodes/PlannerNode`(plan-request 토픽 구독 → WASM 호출 → path 토픽 발행) 추가.
 - `scripts/planner-wasm-smoke.mjs`(6개 체크, `npm test`에 배선)로 Node 검증, 추가로 실제 Chrome에서 수동으로 `findPath` 직접 호출해 Node와 동일한 결과(distance 9.806, path 41점)를 확인 — RWD 스모크 테스트와 달리 이번엔 실브라우저까지 확인함.
 
-**남은 것 (Phase 7 전체로 보면 절반)**: 이 노드는 "격자가 주어지면 경로를 찾는다"만 한다. 그 격자를 LIDAR 스캔으로 직접 만드는 `MapNode`, 경로를 `cmd_vel`로 바꾸는 `PathFollowerNode`, 그리고 로봇의 실측 pose를 공급하는 `OdometryNode`는 아직 없다 — roadmap.md Phase 7의 나머지 항목.
+**남은 것**: `PlannerNode`는 "격자가 주어지면 경로를 찾는다"만 한다. 이후 세션에서 `OdometryNode`(+`PoseFusionNode`, 커밋 `7c5c370`)와 `PathFollowerNode`(커밋 `60bf0b0`)가 추가됐다 — 상세는 `robot-project/doc/architecture-improvements.md` §⑩⑪. Phase 7에서 아직 안 만든 노드는 **`MapNode`**(LIDAR 스캔 + pose → 점유격자, `NewGridFromOccupancy`에 먹일 costmap)와 대시보드 2D 캔버스 뷰뿐.
 
 ## 아직 정하지 않은 것
 

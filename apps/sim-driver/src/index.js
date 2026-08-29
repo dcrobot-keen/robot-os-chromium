@@ -47,7 +47,7 @@ import { readFile } from 'node:fs/promises';
 import { WebSocketTransport, startHeartbeat, encodeCommand } from '@ros-chromium/transport';
 import { createDriveDevice } from '@ros-chromium/device-abstraction';
 import { LocalBus } from '@ros-chromium/bus';
-import { PathFollowerNode, OdometryNode, PoseFusionNode } from '@ros-chromium/nodes';
+import { PathFollowerNode, OdometryNode, PoseFusionNode, MapNode, gridConfigFromBounds } from '@ros-chromium/nodes';
 
 const ROBOTEQ_URL = process.env.SIM_ROBOTEQ_URL || 'ws://127.0.0.1:8765';
 const SENSOR_URL = process.env.SIM_SENSOR_URL || 'ws://127.0.0.1:8766';
@@ -68,6 +68,17 @@ const CORRECTION_TOPIC = `${ROBOT_ID}/correction`;
 const POSE_TOPIC = `${ROBOT_ID}/pose`; // fused estimate -- what PathFollowerNode actually steers by
 const PATH_TOPIC = `${ROBOT_ID}/path`;
 const CMD_TOPIC = `${ROBOT_ID}/drive/cmd_vel`;
+const SCAN_TOPIC = `${ROBOT_ID}/scan`; // sim sensor stream's laser scan, put on the bus for MapNode
+const MAP_TOPIC = `${ROBOT_ID}/map`; // MapNode's occupancy grid (raw + body-inflated)
+
+// MapNode grid: a fixed window on pathfinder's plane, centred on the sim's
+// local room origin. The sim worlds top out around 14x10m; MAP_SPAN gives
+// margin on every side. cellSize 0.05m matches the LDS-01's angular
+// resolution at close range without exploding the cell count (SPAN/cs)^2.
+const MAP_SPAN = Number(process.env.MAP_SPAN ?? 20); // metres, square, half each side of origin
+const MAP_CELL = Number(process.env.MAP_CELL ?? 0.05);
+// TB3 Burger body radius ~0.11m; a bit more keeps pure pursuit off the walls.
+const MAP_INFLATION = Number(process.env.MAP_INFLATION ?? 0.18);
 
 // Box-Muller gaussian, same technique as ros-chromium/simulator/src/noise.js
 // (a separate, deliberately unshared copy -- see that file's own header).
@@ -126,6 +137,32 @@ new PoseFusionNode(bus, {
   // comment in pose-fusion-node.js for why this can't just be left at 0.
 });
 
+// --- mapping: laser scans + fused pose -> occupancy grid on the bus ---
+// Poses on POSE_TOPIC already live in pathfinder's plane (ORIGIN offset
+// applied below), so the grid is defined there too and MapNode's output
+// drops straight into a PlannerNode request.
+const mapGrid = gridConfigFromBounds(
+  { minX: ORIGIN_X - MAP_SPAN, minY: ORIGIN_Y - MAP_SPAN, maxX: ORIGIN_X + MAP_SPAN, maxY: ORIGIN_Y + MAP_SPAN },
+  MAP_CELL
+);
+let lastMapLogAt = 0;
+// eslint-disable-next-line no-new -- wires itself up via the bus subscriptions in its constructor
+new MapNode(bus, {
+  scanTopic: SCAN_TOPIC,
+  poseTopic: POSE_TOPIC,
+  mapTopic: MAP_TOPIC,
+  grid: mapGrid,
+  inflationRadius: MAP_INFLATION,
+  onUpdate: (map) => {
+    if (Date.now() - lastMapLogAt < 5000) return;
+    lastMapLogAt = Date.now();
+    const occ = map.occupied.reduce((n, c) => n + (c ? 1 : 0), 0);
+    const inf = map.occupiedInflated.reduce((n, c) => n + (c ? 1 : 0), 0);
+    log(`map: ${occ} occupied / ${inf} inflated of ${map.cols}x${map.rows} cells`);
+  },
+});
+log(`MapNode grid ${mapGrid.cols}x${mapGrid.rows} @ ${MAP_CELL}m, origin (${mapGrid.originX.toFixed(2)}, ${mapGrid.originY.toFixed(2)}), inflation ${MAP_INFLATION}m`);
+
 // eslint-disable-next-line no-new -- wires itself up via the bus subscriptions in its constructor
 new PathFollowerNode(bus, {
   pathTopic: PATH_TOPIC,
@@ -169,6 +206,12 @@ sensorWs.addEventListener('open', () => log(`connected to simulator sensor strea
 sensorWs.addEventListener('message', (event) => {
   const msg = JSON.parse(event.data);
   if (msg.type !== 'frame') return; // the first message is {type:'hello', ...}
+
+  // laser scan -> bus, for MapNode. ranges/angles are robot-relative, so no
+  // ORIGIN offset here -- MapNode places them using the fused pose, which is
+  // already in pathfinder's plane.
+  if (msg.scan) bus.publish(SCAN_TOPIC, msg.scan);
+
   const truth = { x: msg.groundTruth.x + ORIGIN_X, y: msg.groundTruth.y + ORIGIN_Y, theta: msg.groundTruth.theta };
   relayPoseToPathfinder(TRUTH_ID, truth);
 
