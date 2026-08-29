@@ -15,11 +15,12 @@
 // firmware sim's own log: an RWD watchdog stop ~1s (SIM_RWD_MS) after the
 // last command, logged after this process has already exited.
 
+import { readFile } from 'node:fs/promises';
 import { WebSocketTransport, startHeartbeat } from '../packages/transport/src/index.js';
 import { createDriveDevice } from '../packages/device-abstraction/src/drive-device.js';
 
 const PORT = Number(process.env.SIM_PORT || 8765);
-const manifest = { drive: { channels: { left: 1, right: 2 } } };
+const manifest = JSON.parse(await readFile(new URL('../manifests/former.manifest.json', import.meta.url)));
 
 function log(msg) {
   console.log(`[client ${new Date().toISOString()}] ${msg}`);

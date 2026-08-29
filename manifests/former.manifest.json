@@ -3,12 +3,15 @@
   "base": "roboteq",
   "transport": { "kind": "roboteq-serial", "baud": 115200, "device": "/dev/ttyMOTOR" },
   "drive": {
+    "kind": "differential",
     "channels": { "left": 1, "right": 2 },
-    "maxWheelRpm": 200,
-    "commandUnitsFullScale": 1000,
-    "countsPerRev": 16384,
-    "wheelRadius": 0.085,
-    "wheelSeparation": 0.305,
+    "scale": 1000,
+    "commands": {
+      "enable": "!MG",
+      "estop": "!EX",
+      "setVelocity": "!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"
+    },
+    "geometry": { "wheelRadius": 0.085, "wheelSeparation": 0.305, "countsPerRev": 16384, "maxWheelRpm": 200 },
     "readback": {
       "encoder": "?C",
       "battery": "?V 2",

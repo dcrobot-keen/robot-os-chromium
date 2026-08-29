@@ -8,6 +8,7 @@
 //   node scripts/roboteq-smoke.mjs
 
 import { spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { WebSocketTransport } from '../packages/transport/src/index.js';
@@ -15,6 +16,7 @@ import { createDriveDevice } from '../packages/device-abstraction/src/drive-devi
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SIM = resolve(here, '../../firmware/sim/src/index.js');
+const manifest = JSON.parse(await readFile(new URL('../manifests/former.manifest.json', import.meta.url)));
 const PORT = 8791;
 const RWD_MS = 400;
 
@@ -41,7 +43,7 @@ try {
   transport.onMessage((m) => replies.push(m));
   await transport.connect();
 
-  const drive = createDriveDevice(transport, { drive: { channels: { left: 1, right: 2 } } });
+  const drive = createDriveDevice(transport, manifest);
 
   // --- ?FID handshake --------------------------------------------------
   await transport.send(new TextEncoder().encode('?FID\r'));

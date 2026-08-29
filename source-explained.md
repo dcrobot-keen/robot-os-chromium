@@ -54,7 +54,13 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 `loadManifest(url)`은 `fetch()`로 매니페스트 JSON을 받아오는 것뿐이다. 스키마 검증은 없고, fetch 자체가 실패하면 에러를 던진다. 브라우저 전용이라(HTTP fetch를 가정) Node에서 직접 쓸 일은 없다.
 
-`createDriveDevice(transport, manifest)`는 좌우 바퀴를 단일 "drive" 액션으로 모델링한다 — Roboteq `!G`가 한 명령에 두 채널을 같이 싣고, 디퍼렌셜 드라이브는 애초에 좌우가 하나의 명령으로 움직이는 게 물리적으로 맞다. 세 가지를 노출한다: `enable()`(`!MG` — 모터는 연결/ESTOP/워치독 이후 항상 비활성으로 시작하므로 연결 후 한 번 불러야 함), `estop()`(`!EX`), `setVelocity(left, right)`. `left`/`right`는 정규화된 [-1, 1](TeleopNode와 수동 슬라이더가 내는 값)이고, `±1`을 `±1000` Roboteq 단위(= ±200 바퀴 RPM)로 매핑해 `!G <chL> n_!G <chR> n`을 만들어 보낸다. 채널 번호는 매니페스트의 `drive.channels`에서 온다. 실제 단위(바퀴 rad/s → RPM ×60/2π → ÷200×1000)로 가는 경로는 `former-motor-protocol.md`에 있고, 기존 teleop 파이프라인과 맞추려고 지금은 정규화 값을 그대로 쓴다. 속도 리드백(`drive.readback.encoder = "?C"`)은 `?C` 카운트 델타로 바퀴 속도를 뽑는 폴 루프가 아직 없어서 TODO.
+`createDriveDevice(transport, manifest)`는 **디바이스 무관**하다. 명령 어휘를 코드에 박지 않고 전부 매니페스트에서 읽는다 — `drive.commands`(`enable`/`estop`/`setVelocity` 템플릿), `drive.channels`(`{left, right}` 채널 번호), `drive.scale`(정규화 → 와이어 단위 스케일). 그래서 같은 와이어 프로토콜을 쓰는 다른 디퍼렌셜 베이스는 이 파일을 안 건드리고 매니페스트 파일만 새로 쓰면 된다(plan.md Phase 3의 "로봇마다 바뀌는 건 매니페스트 하나" 목표).
+
+`setVelocity(left, right)`는 정규화 [-1, 1](TeleopNode·슬라이더가 내는 값)을 받아 `toUnits`로 `±scale`(Former은 1000 = ±200 바퀴 RPM)로 클램프한 뒤, `drive.commands.setVelocity` 템플릿의 `${ch.left}`/`${ch.right}`/`${v.left}`/`${v.right}` 자리를 채워 보낸다 — Former 매니페스트에선 `"!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"` → `!G 1 500_!G 2 -300` 식. `enable()`/`estop()`은 템플릿이 있으면 그대로 보내고 없으면 no-op(연결/ESTOP/워치독 이후 모터가 비활성으로 시작하므로 연결 후 `enable()` 한 번 필요; 매니페스트에 `!MG`/`!EX`).
+
+매니페스트에 **일부러 안 넣은 것** 두 가지: (1) 바이트 인코딩(라인 종결자·프레이밍)은 와이어 프로토콜 소관이라 `encodeCommand`가 코덱(`roboteq.js`)에서 온다 — 지금은 코덱이 Roboteq 하나뿐이고, 두 번째 와이어 프로토콜이 생기면 `manifest.transport.kind`로 코덱을 고른다. (2) 정규화 [-1, 1] 규약은 스택 전역 계약이라 코드에 둔다. 실단위(m/s) API는 별도 후속.
+
+속도 리드백(`drive.readback.encoder = "?C"`)은 `?C` 카운트 델타로 바퀴 속도를 뽑는 폴 루프가 아직 없어서 TODO.
 
 ## packages/nodes/src/teleop-node.js
 
@@ -98,7 +104,7 @@ host 브리지 콘솔. 조작 UI가 없다 — 시그널링/펌웨어/robot id �
 
 ## manifests/former.manifest.json
 
-Former 2.0을 기술하는 매니페스트. `base: "roboteq"`, `transport`(kind/baud/device), `drive`(채널 매핑 `{left:1, right:2}`, `maxWheelRpm`, `countsPerRev`, 바퀴 반지름/축거, 그리고 `readback`에 `?C`/`?V 2`/`?A`/`?T 1`/`?FF`/`?DI` 쿼리 매핑). `drive.channels`만 `createDriveDevice`가 실제로 읽고, 나머지는 아직 문서/향후 용도. 이전 이름은 `rover.manifest.json`(가상의 rover-01)이었다.
+Former 2.0을 기술하는 매니페스트 — 이제 `createDriveDevice`가 실제로 소비하는 데이터다. `drive.commands`(`enable`/`estop`/`setVelocity` 템플릿 문자열), `drive.channels`(`{left:1, right:2}`), `drive.scale`(1000)이 주행 동작을 완전히 규정한다. `drive.geometry`(바퀴 반지름/축거/`countsPerRev`/`maxWheelRpm`)와 `drive.readback`(`?C`/`?V 2`/`?A`/`?T 1`/`?FF`/`?DI` 쿼리 매핑)은 아직 문서/향후 용도. `base: "roboteq"`, `transport`(kind/baud/device)도 지금은 참고용. 이전 이름은 `rover.manifest.json`(가상의 rover-01). `scripts/prototype-client.mjs`와 `scripts/roboteq-smoke.mjs`도 이 파일을 그대로 읽어 쓴다(dogfooding).
 
 ## scripts/prototype-client.mjs
 

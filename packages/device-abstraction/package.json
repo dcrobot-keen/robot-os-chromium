@@ -3,6 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Manifest loader plus createDriveDevice, a WoT-style action wrapper that emits Roboteq !G commands via the transport (see ../../manifests/former.manifest.json and ../../../former-motor-protocol.md).",
+  "description": "Manifest loader plus createDriveDevice — a WoT-style drive action whose wire command vocabulary is read from the manifest (drive.commands/channels/scale), so a new differential base on the same wire protocol needs no code change. See ../../manifests/former.manifest.json and ../../../former-motor-protocol.md.",
   "main": "src/index.js"
 }

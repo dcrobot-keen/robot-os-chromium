@@ -318,6 +318,17 @@ candidate, RTT ~0). 실제 두 번째 머신이 붙는 시점에 다시 확인�
 `scripts/signaling-smoke.mjs`(8/8), `prototype-client.mjs` 크래시 회귀 모두 통과.
 WebRTC 실동작은 여전히 사람이 브라우저로 확인해야 한다(Phase 5 절 "사람이
 확인해줘야 하는 것", robot id만 `former-01`로).
+
+### 매니페스트 주도로 전환
+
+`createDriveDevice`에서 Roboteq 하드코딩(`!G`/`!MG`/`!EX`, 스케일)을 걷어내고
+매니페스트의 `drive.commands`(템플릿 문자열) + `drive.channels` + `drive.scale`에서
+읽도록 했다. `setVelocity` 템플릿은 `${ch.left}`/`${v.right}` 같은 자리를 채우는
+방식(`"!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"`). 결과적으로 **같은 와이어
+프로토콜을 쓰는 다른 디퍼렌셜 베이스 = 새 매니페스트 파일 하나, `drive-device.js`
+무수정.** 코드에 남긴 건 인코딩(코덱 소관)과 [-1,1] 정규화 규약뿐. 두 Node
+스크립트도 실제 매니페스트 파일을 읽도록 바꿔 dogfooding. 다른 *와이어 프로토콜*이
+생기면 `manifest.transport.kind`로 코덱을 고르는 지점만 추가하면 된다.
 - **`GET_ENCODER` 리드백**(지금 매니페스트에 매핑만 있고 미구현)은 Former가 실제로
   주는 엔코더/오도메트리 데이터로 채운다.
 - LIDAR(SICK TiM571, Ethernet/CoLa)와 RealSense D435(USB/UVC)는 브라우저로 붙이기
