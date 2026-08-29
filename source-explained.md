@@ -132,9 +132,13 @@ Former 2.0을 기술하는 매니페스트 — 이제 실제로 소비된다. `d
 
 Roboteq 라인 프로토콜 전 구간을 브라우저 없이 검증하는 스모크 테스트 — `WebSocketTransport` + `roboteq.js` 코덱 + 시뮬레이터의 Roboteq 에뮬레이터 + `createDriveDevice`, 그리고 load-bearing한 RWD 워치독. 자체적으로 시뮬레이터를 짧은 `SIM_RWD_MS`로 자식 프로세스로 띄우고 8개 체크(`?FID` 응답, 매니페스트 `drive.commands.init` 시퀀스 전부 `+` ack, `!MG` 전엔 `!G` 무시, `!MG` 후 엔코더 증가, `+` ack, `!EX` 후 `FF=16`/`DI=0` 래치, 침묵 시 RWD 정지)를 돌린 뒤 PASS/FAIL, 실패 시 non-zero 종료. `node scripts/roboteq-smoke.mjs`.
 
+마지막 체크("침묵 시 RWD 정지")는 단순히 로그에 그 줄이 있는지가 아니라, 침묵을 시작한 시점부터 그 줄이 실제로 찍히기까지의 시간을 20ms 간격으로 폴링해 측정하고 `RWD_MS`~`RWD_MS+150ms` 범위 안인지 어서션하는 **타이밍 회귀 테스트**다(`plan.md` "npm test 배선 + RWD 타이밍 검사를 회귀 테스트로 강화" 참고) — 워치독이 원래보다 훨씬 느려져도 "언젠가는 멈췄으니" 통과해버리는 구멍을 막기 위함.
+
 ## scripts/signaling-smoke.mjs
 
 `apps/signaling-server`와 `SignalingClient`를 브라우저 없이 검증하는 스모크 테스트. `RTCPeerConnection`은 Node에 없으므로 여기서는 안 건드리고, "랑데부"만 본다 — hello→ready, peer-joined/peer-left, 한 피어의 `signal` 블롭이 다른 피어에게 그대로(순서 보존 포함) 나오는지. SDP/ICE 페이로드는 가짜 문자열이다(서버가 안 들여다보므로). 자체적으로 던져버릴 포트에 시그널링 서버를 자식 프로세스로 띄우고, 8개 체크를 돌린 뒤 PASS/FAIL을 찍고 실패 시 non-zero로 종료한다. `node scripts/signaling-smoke.mjs`.
+
+두 스모크 테스트 모두 루트에서 `npm test`로 함께 실행할 수 있다(`package.json`의 `test` 스크립트).
 
 ## scripts/serve-dashboard.mjs
 

@@ -6,5 +6,8 @@
   "workspaces": [
     "packages/*",
     "apps/*"
-  ]
+  ],
+  "scripts": {
+    "test": "node scripts/roboteq-smoke.mjs && node scripts/signaling-smoke.mjs"
+  }
 }

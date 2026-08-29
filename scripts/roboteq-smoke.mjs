@@ -90,14 +90,36 @@ try {
   check('after !EX: FF=16 (motor disabled)', ff && ff.values[0] === 16);
   check('after !EX: DI shows estopped (0)', di && di.values[0] === 0);
 
-  // --- RWD watchdog fires on silence -----------------------------
-  // Re-enable, drive, then go quiet and let the sim's RWD stop it.
+  // --- RWD watchdog fires on silence, within a bounded latency ------
+  // Re-enable, drive, then go quiet and let the sim's RWD stop it. Poll for
+  // the log line instead of a single fixed sleep-then-grep so we can
+  // measure how long it actually took: a fixed "wait RWD_MS+300 then check
+  // the log contains the line" would silently keep passing even if a
+  // regression made the watchdog 2x slower, as long as it still fired
+  // somewhere inside that generous window. RWD_TOLERANCE_MS bounds how much
+  // slower than the configured RWD_MS we accept before calling it a
+  // regression (Node timer jitter + the sim's own 20ms tick + our poll step) --
+  // this is what actually makes the check a *timing* regression test rather
+  // than a "did it eventually happen" functional check.
   await drive.enable();
   await drive.setVelocity(0.4, 0.4);
-  const before = simLog.length;
-  await wait(RWD_MS + 300);
-  check('RWD watchdog stops motors after silence',
-    simLog.slice(before).includes('RWD: no serial command'));
+  const silenceStart = Date.now();
+  const sinceSilence = simLog.length;
+  const RWD_TOLERANCE_MS = 150;
+  const RWD_POLL_MS = 20;
+  let rwdLatencyMs = null;
+  while (Date.now() - silenceStart < RWD_MS + RWD_TOLERANCE_MS + RWD_POLL_MS) {
+    if (simLog.slice(sinceSilence).includes('RWD: no serial command')) {
+      rwdLatencyMs = Date.now() - silenceStart;
+      break;
+    }
+    await wait(RWD_POLL_MS);
+  }
+  check(
+    `RWD watchdog stops motors within ${RWD_MS}-${RWD_MS + RWD_TOLERANCE_MS}ms of silence ` +
+      `(measured ${rwdLatencyMs ?? `>${RWD_MS + RWD_TOLERANCE_MS}`}ms)`,
+    rwdLatencyMs !== null && rwdLatencyMs >= RWD_MS && rwdLatencyMs <= RWD_MS + RWD_TOLERANCE_MS
+  );
 
   transport.close();
   await wait(50);
