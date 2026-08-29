@@ -269,8 +269,45 @@ operator의 데이터채널이 열릴 때마다 펌웨어로 **새 WebSocket**�
 지연시간과 NAT 통과는 이 한 대짜리 테스트로는 의미 있게 못 잰다(둘 다 host
 candidate, RTT ~0). 실제 두 번째 머신이 붙는 시점에 다시 확인한다.
 
+## 타겟 하드웨어 확정 — ROAS Former 2.0
+
+레퍼런스 하드웨어가 **ROAS Former 2.0**(https://roas.co.kr/former/)으로 정해졌다.
+회사 보유 유닛이고 OS는 Debian(기본은 Ubuntu)이다. 자세한 배경과 펌웨어 경계가
+어떻게 바뀌는지는 `firmware/plan.md`의 "타겟 하드웨어 확정" 절에 적었고, 여기서는
+`web` 레포에 미치는 영향만 정리한다.
+
+- **온보드 컴퓨터가 완전한 x86-64 PC다** (i5-8265U, 8GB). MCU가 아니다. 즉
+  Chromium을 **로봇 위에서 직접** 돌릴 수 있다. Phase 5의 `host.html` 브리지를
+  Former의 Debian에서 띄우고, operator 랩탑이 WebRTC로 진짜 원격 접속하는 구성이
+  자연스럽다.
+- **베이스 연결은 RS232 @ 115200** (기본형; 업그레이드형은 Ethernet + USB). 지금까지
+  "실제 보드가 정해지면"으로 미뤄둔 `WebSerialTransport`의 대상이 바로 이 RS232
+  링크다. Debian Chromium이 `/dev/ttyUSB*`(또는 `/dev/ttyS*`)를 WebSerial로 연다.
+  전제: 유저가 `dialout` 그룹, **apt Chromium**(snap은 confinement가 `/dev/tty*`를
+  막아서 안 됨), secure context(localhost는 OK), origin별 포트 권한 영속화.
+- **와이어 프로토콜을 우리 것 → ROAS 것으로 교체한다.** 지금 `packages/transport`의
+  `frame.js`/`commands.js`(SOF/LEN/CMD/CRC16, `SET_VELOCITY`/`HEARTBEAT`/`ESTOP`)는
+  처음부터 placeholder였다. `former_hardware_interface` 소스에서 실제 프로토콜을
+  역추출해 `../former-motor-protocol.md`(루트 스크래치 레포)에 정리했다 — 결론은
+  **Former 구동부가 Roboteq 모터 컨트롤러**이고, 115200 8N1 라인 프로토콜(`\r` 종결,
+  `_` 다중명령 구분)에 Roboteq ASCII 명령(`!G 1 n_!G 2 n`, `!MG`, `!EX`, `?C`, `?V`
+  …)을 그대로 말하면 된다. `packages/transport`는 이 Roboteq 코덱으로,
+  `firmware/sim`은 Roboteq 에뮬레이터로 다시 쓴다. `HardwareTransport` 인터페이스
+  위쪽(device-abstraction, bus, nodes, rtc, dashboard)은 프로토콜이 바뀌어도 안
+  건드리는 게 이 구조를 둔 이유다 — 이번이 그 가정의 첫 실전 시험이 된다.
+- **워치독은 이미 존재한다.** Roboteq 내장 시리얼 워치독(`RWD`, 기본 1000ms)이
+  시리얼 침묵 시 브라우저와 무관하게 모터를 세운다 — 안전 모델의 "펌웨어 워치독"이
+  이것이다. 우리 heartbeat(100ms 주기)는 이 1000ms 안에서 뭔가를 계속 보내기만 하면
+  된다. E-STOP = `!EX`. (실기에서 `~RWD`가 0이 아닌지 확인 필요 —
+  `../former-motor-protocol.md` 참고.)
+- **`GET_ENCODER` 리드백**(지금 매니페스트에 매핑만 있고 미구현)은 Former가 실제로
+  주는 엔코더/오도메트리 데이터로 채운다.
+- LIDAR(SICK TiM571, Ethernet/CoLa)와 RealSense D435(USB/UVC)는 브라우저로 붙이기
+  훨씬 어려워 당분간 범위 밖. 디퍼렌셜 베이스가 첫 교체 대상이다.
+
 ## 아직 정하지 않은 것
 
-레퍼런스 하드웨어(현재는 디퍼렌셜 드라이브 로버 하나로 가정)와 정확한 커맨드 어휘는 실제 타겟 로봇이 정해지는 대로 다시 확정해야 한다. 매니페스트 스키마의 버전 관리 방식과, rtc 계층에서 WebRTC가 NAT 통과에 실패했을 때의 폴백(로컬 네트워크 안에서는 signaling-server를 거치는 일반 WebSocket 릴레이로 대체하는 방안을 고려 중)도 아직 세부 설계가 남아 있다.
+정확한 RS232 커맨드 어휘와 Former 베이스의 명령 타임아웃(워치독) 동작은
+`former_hardware_interface` 소스를 읽어 확정한다. 매니페스트 스키마의 버전 관리 방식과, rtc 계층에서 WebRTC가 NAT 통과에 실패했을 때의 폴백(로컬 네트워크 안에서는 signaling-server를 거치는 일반 WebSocket 릴레이로 대체하는 방안을 고려 중)도 아직 세부 설계가 남아 있다.
 
 Phase 5에서 새로 생긴 미결 항목: (1) 실제 로봇 위의 host 브리지가 시뮬레이터처럼 "operator 세션마다 펌웨어 연결을 새로 여는" 모델로 가야 하는지, 아니면 펌웨어에 명시적 재무장(arm) 명령을 두고 host는 연결을 계속 유지하는 모델로 가야 하는지. (2) operator가 여럿 붙었을 때 누가 하트비트를 소유하고 누가 조작 권한을 갖는지(지금은 operator 1명 전제) — 조작권 중재(handover) 설계. (3) TURN 서버 운영 방식.
