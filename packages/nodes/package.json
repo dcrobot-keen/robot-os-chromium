@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "TeleopNode (Gamepad API polling -> bus). OdometryNode and SafetyMonitorNode are still TODO (need GET_ENCODER/GET_IMU, which the firmware doesn't implement yet). None of these run in their own Web Worker yet — see plan.md.",
-  "main": "src/index.js"
+  "description": "TeleopNode (Gamepad API polling -> bus). PlannerNode (grid A*/Hybrid A* via @ros-chromium/planner-wasm, roadmap.md Phase 7). OdometryNode, MapNode, PathFollowerNode, and SafetyMonitorNode are still TODO (need GET_ENCODER/GET_IMU, which the firmware doesn't implement yet). None of these run in their own Web Worker yet — see plan.md.",
+  "main": "src/index.js",
+  "dependencies": {
+    "@ros-chromium/planner-wasm": "*"
+  }
 }

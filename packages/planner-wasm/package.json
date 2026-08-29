@@ -1,0 +1,8 @@
+{
+  "name": "@ros-chromium/planner-wasm",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Loads pathfinder's grid A*/Hybrid A* (a sibling project's Go pathfinding, compiled to WASM) so PlannerNode can compute paths over a local occupancy grid without a server round-trip. vendor/ is a vendored build output, not source -- see scripts/refresh-vendor.mjs and ../../plan.md.",
+  "main": "src/index.js"
+}

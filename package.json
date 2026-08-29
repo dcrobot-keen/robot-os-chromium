@@ -8,6 +8,6 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "node scripts/roboteq-smoke.mjs && node scripts/signaling-smoke.mjs"
+    "test": "node scripts/roboteq-smoke.mjs && node scripts/signaling-smoke.mjs && node scripts/planner-wasm-smoke.mjs"
   }
 }
