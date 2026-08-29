@@ -1,0 +1,20 @@
+[Unit]
+Description=Former web stack — signaling + dashboard static server
+Documentation=https://roas.co.kr/former/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Environment=FORMER_BASE=__BASE__
+Environment=DASHBOARD_PORT=5173
+Environment=SIGNALING_PORT=9770
+# one unit, two servers: signaling in the background, static server in the
+# foreground so systemd tracks the unit's liveness on it
+ExecStart=/bin/sh -c '__BASE__/node/bin/node __BASE__/stack/apps/signaling-server/src/index.js & exec __BASE__/node/bin/node __BASE__/stack/scripts/serve-dashboard.mjs'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

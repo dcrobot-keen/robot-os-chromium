@@ -138,7 +138,19 @@ Roboteq 라인 프로토콜 전 구간을 브라우저 없이 검증하는 스�
 
 ## scripts/serve-dashboard.mjs
 
-Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/dashboard/index.html`이 `<script type="module">`로 `packages/transport/src/*.js`를 상대 경로로 불러오는데, HTML 파일을 `file://`로 그냥 열면 크로미움이 모듈 스크립트 로딩을 CORS로 막아버리기 때문에 `http://`로 서빙해야 한다. `web/` 디렉터리 전체를 루트로 서빙하고, 확장자에 따라 `Content-Type`을 최소한으로만 맞춰준다(`.js`/`.mjs`는 `text/javascript`로 지정 — 이게 틀리면 브라우저가 모듈로 인식하지 않는다). 기본 포트는 5173, `DASHBOARD_PORT` 환경변수로 바꿀 수 있다.
+Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/dashboard/*.html`이 `<script type="module">`로 `packages/*/src/*.js`를 상대 경로로 불러오는데, HTML을 `file://`로 열면 크로미움이 모듈 임포트를 CORS로 막으므로 `http://`로 서빙해야 한다. 레포 루트(번들에선 `stack/`)를 통째로 서빙하고, 확장자별 `Content-Type`을 최소한으로 맞춘다(`.js`/`.mjs` → `text/javascript`). 모든 인터페이스에 바인딩하므로 원격 operator 노트북이 `http://<robot-ip>:5173`으로 접근할 수 있다. 기본 포트 5173, `DASHBOARD_PORT`.
+
+## deploy/ — 오프라인 설치 번들
+
+회사망에서 로봇이 외부 접근이 안 돼서, 노트북에서 만들어 옮기는 설치 번들. 상세는 `deploy/README.md`와 `deploy/bundle/README.md`.
+
+- `deploy/make-offline-bundle.sh` (노트북, 인터넷 필요) — 스택 소스 복사(`node_modules`/`.git`/`deploy`/`dist` 제외) + `node_modules/ws` 벤더링(스택의 유일한 외부 런타임 의존성, transitive 0) + Node linux tarball 다운로드 + `debian:<suite>` Docker 컨테이너에서 Chromium `.deb` 의존성 클로저 받기. `--suite`/`--arch`로 로봇 Debian에 맞추고, Docker 없으면 `--skip-chromium`. 결과물 `web/dist/former-webstack-offline-<날짜>.tar.gz`.
+- `deploy/bundle/install.sh` (로봇, 오프라인, sudo 재실행) — `/opt/former-webstack`에 stack + node 설치, 번들 `.deb`를 dpkg, 호출 유저를 `dialout`에 추가, `/dev/ttyMOTOR`가 없으면 udev 규칙 설치, Chromium managed policy(`serial-policy.json` → `/etc/chromium/policies/managed/`)로 WebSerial 포트 피커를 1회 이후 억제, 데스크톱 kiosk autostart(`.desktop`) + 서버용 systemd 유닛(설치만, enable은 안 함). arch 불일치면 중단.
+- `deploy/bundle/kiosk-launch.sh` — `signaling-server` + `serve-dashboard.mjs`를 띄우고(0.0.0.0), 정적 서버가 올라올 때까지 기다린 뒤 `chromium --kiosk`로 `host.html`을 연다. `chromium`/`chromium-browser` 둘 다 대응.
+- `deploy/bundle/former-webstack.service` — 두 Node 서버만 도는 헤드리스용 유닛(`__USER__`/`__BASE__`는 install.sh가 치환). kiosk Chromium은 그래픽 세션이 필요해서 여기 말고 데스크톱 autostart로 뺐다.
+- `deploy/bundle/99-former-serial.rules` — ROAS `former_bringup`의 udev 규칙 사본(FTDI `0403:6001`을 devpath로 구분해 `/dev/ttyMOTOR`). `former_bringup`이 깔려 있으면 그쪽을 쓴다.
+
+스테이징 로직(제외 패턴, `ws` 위치)과 스테이지 복사본에서 두 서버가 기동하는지는 Windows에서 확인. Node/Chromium 실제 다운로드와 로봇 설치는 로봇 Debian 버전 확정 후.
 
 ## apps/dashboard/index.html
 

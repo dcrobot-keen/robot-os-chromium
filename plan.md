@@ -330,8 +330,33 @@ WebSerial 팩토리 + 매니페스트의 `drive.commands.init`(`^ECHOF 1`/`!R 2`
 컨트롤러 연결 직후 100ms 간격으로 전송(bring-up만, 주행 아님). init 시퀀스는
 시뮬레이터에서도 무해(전부 `+` ack) — `roboteq-smoke.mjs`에 체크 추가(이제 8/8).
 
-이걸로 "로봇에 설치" 경로의 코드 공백은 메워졌다. 남은 건 배포 절차(Debian 준비,
-ROS `former_bringup` 정지, systemd 자동실행, WebSerial 권한 영속화)와 실기 검증뿐.
+이걸로 "로봇에 설치" 경로의 코드 공백은 메워졌다.
+
+### 오프라인 설치 번들 (`deploy/`)
+
+회사망에서 로봇이 외부 접근이 안 돼서, 노트북에서 번들을 만들어 LAN(scp)이나 USB로
+옮겨 설치하는 방식으로 갔다. 스택 자체는 빌드가 없고 외부 런타임 의존성이 `ws`
+하나뿐(zero transitive)이라 번들의 무거운 부분은 Node 런타임과 Chromium `.deb`뿐이다.
+
+- `deploy/make-offline-bundle.sh` (노트북) — 스택 소스 복사 + `ws` 벤더링 + Node
+  linux tarball 다운로드 + `debian:<suite>` 컨테이너로 Chromium `.deb` 클로저 받기
+  → `web/dist/former-webstack-offline-<날짜>.tar.gz`. `--suite`/`--arch`로 로봇
+  Debian에 맞추고, Docker 없으면 `--skip-chromium`.
+- `deploy/bundle/install.sh` (로봇, 오프라인) — `/opt/former-webstack`에 설치,
+  `.deb` dpkg, `dialout` 그룹, udev 규칙, Chromium managed policy
+  (`SerialAllowUsbDevicesForUrls` — 재부팅마다 포트 피커 안 뜨게), 데스크톱 kiosk
+  autostart + 서버용 systemd 유닛(옵션).
+- `deploy/bundle/kiosk-launch.sh` — signaling + 정적 서버 띄우고 Chromium을
+  `host.html`(hardware 모드)로 kiosk 실행.
+- 로봇에서 `signaling-server`도 같이 돈다(로봇↔노트북 LAN 전제). operator는
+  노트북에서 `http://<robot-ip>:5173/.../index.html` operator 모드로 붙는다 —
+  데이터채널 전용 WebRTC는 plain http에서도 동작.
+
+스테이징 로직과 스택이 스테이지 복사본에서 정상 기동하는지는 Windows에서 검증했다.
+Node/Chromium 실제 다운로드와 로봇 설치는 로봇 Debian 버전이 확정되면 마무리.
+
+남은 건 실기 검증(`?FID` 모델, `~RWD` ≠ 0, 채널 좌우/부호)과 ROS `former_bringup`
+정지뿐.
 
 ### 매니페스트 주도로 전환
 

@@ -1,0 +1,9 @@
+{
+  "_comment": "Chromium managed policy — lets the dashboard origin open the Former's Roboteq serial adapter without the port picker after the first grant. vendor_id 1027 = 0x0403 (FTDI), product_id 24577 = 0x6001 (FT232). Installed by install.sh to /etc/chromium/policies/managed/former-serial.json.",
+  "SerialAllowUsbDevicesForUrls": [
+    {
+      "devices": [{ "vendor_id": 1027, "product_id": 24577 }],
+      "urls": ["http://localhost:5173"]
+    }
+  ]
+}
