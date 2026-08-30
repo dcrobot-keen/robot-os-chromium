@@ -1,9 +1,10 @@
 // Smoke test for MapNode -- no browser, no simulator. Checks the grid
 // geometry stays byte-compatible with pathfinder/grid/grid.go, the ray
-// traversal + hit/miss thresholding turn a synthetic laser scan into the
-// right walls, inflation dilates them by the body radius, and the published
-// object plans a path through @ros-chromium/planner-wasm (the whole point:
-// MapNode's output is a drop-in for NewGridFromOccupancy).
+// traversal + log-odds Bayes update turn a synthetic laser scan into the
+// right walls, inflation dilates them by the body radius, a built map
+// serialize/load round-trips, and the published object plans a path
+// through @ros-chromium/planner-wasm (the whole point: MapNode's output is
+// a drop-in for NewGridFromOccupancy).
 //
 //   node scripts/map-node-smoke.mjs
 import { readFile } from 'node:fs/promises';
@@ -12,7 +13,10 @@ import {
   worldToCell,
   cellIndex,
   castRayCells,
-  thresholdOccupancy,
+  probFromLogOdds,
+  occupancyFromLogOdds,
+  serializeMap,
+  deserializeMap,
   inflateOccupancy,
   clearDisc,
   MapNode,
@@ -59,12 +63,39 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   check('castRayCells: diagonal walk has no jumps > 1 cell', diag.every((c, i) => i === 0 || Math.abs(c.col - diag[i - 1].col) + Math.abs(c.row - diag[i - 1].row) === 1));
 }
 
-// --- 4. thresholdOccupancy: minHits AND endpoint ratio ---
+// --- 4. log-odds Bayes update: probability, threshold, inertia ---
 {
-  const occ = thresholdOccupancy([3, 1, 0], [0, 0, 0], { minHits: 2, occRatio: 0.2 });
-  check('thresholdOccupancy: 3 hits -> occupied, 1 hit -> below minHits, 0 -> unobserved free', occ[0] === true && occ[1] === false && occ[2] === false);
-  const glancing = thresholdOccupancy([5], [100], { minHits: 2, occRatio: 0.2 });
-  check('thresholdOccupancy: many pass-throughs vs few endpoints -> free (ratio gate)', glancing[0] === false);
+  check('probFromLogOdds: L=0 -> p=0.5 (unobserved)', Math.abs(probFromLogOdds(0) - 0.5) < 1e-12);
+  check('probFromLogOdds: L>0 -> p>0.5, L<0 -> p<0.5', probFromLogOdds(1) > 0.5 && probFromLogOdds(-1) < 0.5);
+
+  const lo = new Float32Array([0, 0.85, -0.4, 2.0, -2.0]);
+  const occ = occupancyFromLogOdds(lo, { occThreshold: 0.5 });
+  check('occupancyFromLogOdds: unobserved and free cells -> not occupied', occ[0] === false && occ[2] === false && occ[4] === false);
+  check('occupancyFromLogOdds: one positive hit is above p=0.5', occ[1] === true);
+
+  // inertia: 20 free observations then 1 spurious hit stays free;
+  // 20 hits then 1 spurious pass-through stays occupied. (hit/miss tally
+  // would have flipped both.)
+  let freeCell = 0, wallCell = 0;
+  const clampL = (v) => Math.max(-2.0, Math.min(3.5, v));
+  for (let i = 0; i < 20; i++) { freeCell = clampL(freeCell - 0.4); wallCell = clampL(wallCell + 0.85); }
+  freeCell = clampL(freeCell + 0.85); // one spurious return
+  wallCell = clampL(wallCell - 0.4);  // one spurious pass-through
+  check('log-odds inertia: a corridor seen free 20x survives one noisy return', probFromLogOdds(freeCell) < 0.5, `p=${probFromLogOdds(freeCell).toFixed(3)}`);
+  check('log-odds inertia: a wall seen 20x survives one noisy pass-through', probFromLogOdds(wallCell) > 0.5, `p=${probFromLogOdds(wallCell).toFixed(3)}`);
+}
+
+// --- 4b. serializeMap / deserializeMap round-trip ---
+{
+  const cfg = { originX: -1, originY: -2, cellSize: 0.05, cols: 40, rows: 30 };
+  const lo = new Float32Array(cfg.cols * cfg.rows);
+  for (let i = 0; i < lo.length; i++) lo[i] = (i % 7) - 3 + (i % 3) * 0.1; // spread of values
+  const blob = serializeMap(cfg, lo);
+  check('serializeMap: tagged blob with base64 data', blob.format === 'mapnode-logodds-v1' && typeof blob.data === 'string');
+  const { cfg: cfg2, logOdds: lo2 } = deserializeMap(blob);
+  check('deserializeMap: grid config round-trips', JSON.stringify(cfg2) === JSON.stringify(cfg));
+  const maxErr = Math.max(...[...lo].map((v, i) => Math.abs(v - lo2[i])));
+  check('deserializeMap: log-odds round-trip within int8 quantization', maxErr <= 1 / 32 + 1e-6, `max err ${maxErr.toFixed(4)}`);
 }
 
 // --- 5. inflateOccupancy: circular dilation by a metric radius ---
@@ -131,13 +162,14 @@ try {
 
   bus.publish('pose', { x: 2, y: 2, theta: 0 });
   const scan = roomScan(2, 2, 0, W, H);
-  for (let i = 0; i < 3; i++) bus.publish('scan', scan); // >= minHits
+  for (let i = 0; i < 5; i++) bus.publish('scan', scan); // build up log-odds
   await wait(120); // let the publish timer fire
 
   const map = node.snapshot();
   check('MapNode: publishes on its timer', maps.length >= 1);
   check('MapNode: grid config passes through unchanged', map.cols === cfg.cols && map.rows === cfg.rows && map.originX === 0);
   check('MapNode: occupied array length is cols*rows', map.occupied.length === cfg.cols * cfg.rows);
+  check('MapNode: publishes a prob grid (Uint8, p*255)', map.prob instanceof Uint8Array && map.prob.length === cfg.cols * cfg.rows);
 
   const at = (arr, wx, wy) => {
     const { col, row } = worldToCell(cfg, wx, wy);
@@ -180,6 +212,17 @@ try {
     threw = err;
   }
   check('MapNode -> planner: a goal inside the inflated wall is rejected, not crashed', threw instanceof Error, threw?.message);
+
+  // --- Phase 8: save the built map, reset, reload, same walls ---
+  const saved = node.serialize();
+  node.reset();
+  check('MapNode: reset() clears the map (walls gone)', node.snapshot().occupied.every((c) => c === false));
+  node.load(saved);
+  const reloaded = node.snapshot();
+  check('MapNode: load() restores the walls', wallNear(reloaded.occupied, 4, 2) && wallNear(reloaded.occupied, 0, 2));
+  check('MapNode: load() rejects a mismatched grid', (() => {
+    try { node.load({ ...saved, cols: saved.cols + 1 }); return false; } catch { return true; }
+  })());
 
   node.stop();
   bus.close();

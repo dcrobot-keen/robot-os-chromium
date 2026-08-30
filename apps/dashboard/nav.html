@@ -27,7 +27,7 @@
 </head>
 <body>
   <header>
-    <h1>nav — 시뮬레이터 상대 in-browser Nav 스택 (roadmap.md Phase 7)</h1>
+    <h1>nav — 시뮬레이터 상대 in-browser Nav 스택 (roadmap.md Phase 7–8)</h1>
     <div class="controls">
       Connection: <span id="status" class="disconnected">disconnected</span>
       <button id="connectBtn">Connect</button>
@@ -36,11 +36,14 @@
       <button id="estopBtn" disabled>E-STOP</button>
       <button id="clearBtn" disabled>Clear goal/path</button>
       <button id="resetMapBtn" disabled>Reset map</button>
+      <button id="saveMapBtn" disabled>Save map</button>
+      <button id="loadMapBtn" disabled>Load map</button>
       <label><input type="checkbox" id="showOdom" checked /> odom ghost</label>
       <label><input type="checkbox" id="showScan" checked /> laser</label>
       <span class="legend">
-        <span><i class="sw" style="background:#1e1e1e"></i>wall</span>
-        <span><i class="sw" style="background:#b4b4b4"></i>inflated</span>
+        <span><i class="sw" style="background:#1e1e1e"></i>p(wall)→1</span>
+        <span><i class="sw" style="background:#fff"></i>free</span>
+        <span><i class="sw" style="background:#96d2"></i>inflated</span>
         <span><i class="sw" style="background:#e5484d"></i>scan</span>
         <span><i class="sw" style="background:#2a7d2a"></i>pose</span>
         <span><i class="sw" style="background:#3060c0"></i>path</span>
@@ -124,7 +127,7 @@
     const mapCanvas = document.createElement('canvas');
     const mapCtx = mapCanvas.getContext('2d');
     function rasterizeMap(map) {
-      const { cols, rows, occupied, occupiedInflated } = map;
+      const { cols, rows, occupied, occupiedInflated, prob } = map;
       mapCanvas.width = cols; mapCanvas.height = rows;
       const img = mapCtx.createImageData(cols, rows);
       let occ = 0, inf = 0;
@@ -132,8 +135,21 @@
         for (let col = 0; col < cols; col++) {
           const gi = row * cols + col;
           const pi = ((rows - 1 - row) * cols + col) * 4;
-          if (occupied[gi]) { img.data[pi] = 30; img.data[pi + 1] = 30; img.data[pi + 2] = 30; img.data[pi + 3] = 255; occ++; }
-          else if (occupiedInflated[gi]) { img.data[pi] = 180; img.data[pi + 1] = 180; img.data[pi + 2] = 180; img.data[pi + 3] = 150; inf++; }
+          // grayscale by probability: p=0 free -> white, p=0.5 unknown ->
+          // faint, p=1 wall -> black. Phase 8's log-odds map is continuous.
+          if (prob) {
+            const p = prob[gi] / 255;
+            if (p > 0.5) {
+              const g = Math.round(255 * (1 - (p - 0.5) * 2)); // 0.5->255, 1->0
+              img.data[pi] = g; img.data[pi + 1] = g; img.data[pi + 2] = g; img.data[pi + 3] = 255;
+            } else if (p < 0.48) {
+              img.data[pi] = 255; img.data[pi + 1] = 255; img.data[pi + 2] = 255; img.data[pi + 3] = 255;
+            } // p ~= 0.5 -> transparent (unknown)
+          }
+          if (occupied[gi]) occ++;
+          if (occupiedInflated[gi] && !occupied[gi]) {
+            img.data[pi] = 150; img.data[pi + 1] = 150; img.data[pi + 2] = 210; img.data[pi + 3] = 120; inf++;
+          }
         }
       }
       mapCtx.putImageData(img, 0, 0);
@@ -247,7 +263,8 @@
 
     $('mapBtn').addEventListener('click', () => {
       if (mapping || !bus) return;
-      mapping = true; $('mapBtn').disabled = true; $('resetMapBtn').disabled = false;
+      mapping = true; $('mapBtn').disabled = true;
+      for (const b of ['resetMapBtn', 'saveMapBtn', 'loadMapBtn']) $(b).disabled = false;
       const geometry = manifest.drive.geometry;
 
       log(`[m1] MapNode (grid ${GRID.cols}x${GRID.rows} @ ${GRID.cellSize}m)`);
@@ -316,6 +333,25 @@
       path = null; goal = null; bus?.publish(T.path, { path: [] }); bus?.publish(T.cmd, { left: 0, right: 0 });
     });
     $('resetMapBtn').addEventListener('click', () => { mapNode?.reset(); mapBitmap = null; log('map reset'); });
+
+    const MAP_STORE_KEY = 'mapnode:nav';
+    $('saveMapBtn').addEventListener('click', () => {
+      if (!mapNode) return;
+      try {
+        localStorage.setItem(MAP_STORE_KEY, JSON.stringify(mapNode.serialize()));
+        log(`map saved to localStorage["${MAP_STORE_KEY}"]`);
+      } catch (e) { log(`save failed: ${e.message}`); }
+    });
+    $('loadMapBtn').addEventListener('click', () => {
+      if (!mapNode) return;
+      try {
+        const raw = localStorage.getItem(MAP_STORE_KEY);
+        if (!raw) return log('no saved map in localStorage');
+        mapNode.load(JSON.parse(raw));
+        mapBitmap = null;
+        log('map loaded from localStorage');
+      } catch (e) { log(`load failed: ${e.message}`); }
+    });
 
     canvas.addEventListener('click', (ev) => {
       if (!mapNode || !fusedPose) return log('need Start mapping + a pose first');

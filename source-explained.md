@@ -108,18 +108,18 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 ## packages/nodes/src/map-node.js
 
-`MapNode` — roadmap.md Phase 7의 마지막 노드. `scanTopic`(LaserScan 형태 `{ angleMin, angleIncrement, rangeMin, rangeMax, ranges }`)과 `poseTopic`(`{x,y,theta}` — `OdometryNode`/`PoseFusionNode`가 주거나 sim ground truth)을 구독해, 마지막으로 본 pose에서 각 스캔을 점유격자에 rasterize하고 `mapTopic`에 발행한다. 출력 객체는 `@ros-chromium/planner-wasm`의 `findPath` 요청 / pathfinder `grid.NewGridFromOccupancy`에 그대로 넣는 형태: `{ originX, originY, cellSize, cols, rows, occupied, occupiedInflated, updatedAt }`. `occupied`/`occupiedInflated`는 row-major `bool[]`(`row*cols+col`), 원점은 최소 코너, `col=floor((x-originX)/cellSize)` — 전부 `pathfinder/grid/grid.go`의 `CellAt`/`index`와 바이트 단위로 동일(안 그러면 계획된 경로가 벽과 어긋남).
+`MapNode` — roadmap.md Phase 7/8. `scanTopic`(LaserScan 형태 `{ angleMin, angleIncrement, rangeMin, rangeMax, ranges }`)과 `poseTopic`(`{x,y,theta}` — `OdometryNode`/`PoseFusionNode`가 주거나 sim ground truth)을 구독해, 마지막으로 본 pose에서 각 스캔을 격자에 접고 `mapTopic`에 발행한다. 출력 객체는 `@ros-chromium/planner-wasm`의 `findPath` 요청 / pathfinder `grid.NewGridFromOccupancy`에 그대로 넣는 형태: `{ originX, originY, cellSize, cols, rows, occupied, occupiedInflated, prob, updatedAt }`. `occupied`/`occupiedInflated`는 row-major `bool[]`(`row*cols+col`), 원점은 최소 코너, `col=floor((x-originX)/cellSize)` — 전부 `pathfinder/grid/grid.go`의 `CellAt`/`index`와 바이트 단위로 동일. `prob`는 `Uint8Array`(p·255) — grayscale 뷰용.
 
 설계 결정:
-- **hit/miss 집계**(log-odds 아님 — 그건 Phase 8). 빔마다 Amanatides–Woo 격자 순회(`castRayCells`): 지나간 셀은 `misses++`, 끝 셀은 `hits++`(단, `range >= rangeMax`인 "no return" 빔은 끝 셀도 miss). `thresholdOccupancy`가 `hits >= minHits`(기본 2) & `hits/(hits+misses) >= occRatio`(기본 0.2)로 이진화. 미관측 셀은 free.
-- **`occupiedInflated` = `occupied`를 로봇 body 반경만큼 원형 팽창**(`inflateOccupancy`). pathfinder A*는 로봇을 점으로 보고 인플레이션 단계가 없으므로, PlannerNode 요청엔 이 팽창본을 `occupied`로 넣어야 벽을 스치지 않는다. 원본은 표시용 + Phase 8 누적용으로 보존.
-- **현재 pose 셀은 강제 free**(`clearDisc`). 로봇이 벽에 바싹 붙어 팽창 벽이 자기 셀을 덮으면 플래너가 `"start point is inside an obstacle"`로 전 요청을 거부하기 때문.
-- TF가 없으므로 pose·scan을 명시적 bus 입력으로 받아 `world = pose ⊕ (range, angle)` 변환을 직접 한다.
-- 스캔마다 발행하지 않고 `publishHz`(기본 2) 타이머로, 마지막 발행 후 스캔이 하나라도 들어왔을 때만. `snapshot()`으로 동기 조회 가능(테스트용).
+- **Phase 8 — log-odds 이진 베이즈 필터**. 셀마다 `L` 값을 두고 빔마다 Amanatides–Woo 순회(`castRayCells`): 지나간 셀은 `L += free`(기본 −0.4), 끝 셀은 `L += occ`(+0.85; "no return" 빔은 끝 셀도 `free`). `L`을 `[min, max]`(기본 −2 ~ 3.5)로 클램프 → 신뢰도가 유계라서 오래된 벽/복도도 나중에 갱신 가능. `p = 1 − 1/(1+e^L)`, `L=0`이 `p=0.5`(미관측). `occupied`는 `p > threshold`(기본 0.5). Phase 7의 hit/miss 집계 대비 이점은 **관성** — 30번 본 벽이 노이즈 1발에 안 지워지고, 30번 비었던 복도가 반사 1발에 벽이 안 됨. `probFromLogOdds`/`occupancyFromLogOdds`/`probGridU8` export.
+- **`occupiedInflated` = `occupied`를 로봇 body 반경만큼 원형 팽창**(`inflateOccupancy`). pathfinder A*는 로봇을 점으로 보므로 PlannerNode 요청엔 이 팽창본을 넣는다. **현재 pose 셀은 강제 free**(`clearDisc`) — 팽창 벽이 자기 셀 덮으면 플래너가 `"start inside obstacle"`로 거부하기 때문.
+- **저장/로드**: `serialize()` → `{ format:'mapnode-logodds-v1', 격자 config, scale, data: base64(int8 양자화 L) }`. `load(saved)`는 격자 config가 일치해야 복원(안 그러면 셀이 안 맞음). `reset()`은 `L` 전부 0. `serializeMap`/`deserializeMap` export.
+- TF 없이 pose·scan을 명시적 bus 입력으로 받아 `world = pose ⊕ (range, angle)` 직접.
+- `publishHz`(기본 2) 타이머, 스캔이 하나라도 들어왔을 때만. `snapshot()`으로 동기 조회.
 
 ## scripts/map-node-smoke.mjs
 
-`MapNode`를 브라우저·시뮬레이터 없이 검증(26개 체크). 격자 기하가 `grid.go`의 `Bounds`/`CellAt`와 일치하는지, `castRayCells`가 시작 셀→끝 셀을 빠짐없이 걷는지, hit/miss 임계값·팽창·`clearDisc`가 맞는지 단위 검증하고, 마지막에 합성 360빔 방 스캔을 넣어 네 벽이 occupied로 잡히고 실내가 free인지, 팽창이 벽을 안쪽으로 두껍게 만드는지 확인한 뒤, **발행된 격자를 실제 `planner-wasm`에 넣어** 방을 가로지르는 경로가 나오고 팽창 벽 안쪽 목표는 거부되는지까지 왕복한다. `node scripts/map-node-smoke.mjs`.
+`MapNode`를 브라우저·시뮬레이터 없이 검증(34개 체크). 격자 기하 ↔ `grid.go`, `castRayCells` 완주, `probFromLogOdds`/`occupancyFromLogOdds`, **log-odds 관성**(20번 free 후 반사 1발에도 free 유지 / 20번 hit 후 통과 1발에도 wall 유지 — hit/miss였으면 뒤집힘), `serializeMap`/`deserializeMap` 왕복(int8 양자화 오차 이내), 팽창·`clearDisc` 단위 검증. 그다음 합성 360빔 방 스캔을 넣어 네 벽 occupied·실내 free·`prob` 그리드 발행을 확인하고, **발행 격자를 실제 `planner-wasm`에 넣어** 경로 왕복(팽창 벽 안쪽 목표는 거부), 마지막으로 `serialize → reset(벽 사라짐) → load(벽 복원)` + 격자 불일치 로드 거부.
 
 ## scripts/planner-wasm-smoke.mjs
 
@@ -217,13 +217,14 @@ Phase 5에서 모드 선택(`local` / `operator`)이 추가됐다. `local`은 �
 
 ## apps/dashboard/nav.html
 
-roadmap.md Phase 7의 통과 페이지 — 시뮬레이터 상대로 **브라우저 안에서** nav 스택 전체를 돌린다. `apps/sim-driver`(Node)도, pathfinder 서버도 필요 없다. 페이지가 직접:
+roadmap.md Phase 7·8의 통과 페이지 — 시뮬레이터 상대로 **브라우저 안에서** nav 스택 전체를 돌린다. `apps/sim-driver`(Node)도, pathfinder 서버도 필요 없다. 페이지가 직접:
 
 - `WebSocketTransport('ws://127.0.0.1:8765')` (Roboteq) + raw `WebSocket('ws://127.0.0.1:8766')` (센서 스트림)에 붙는다.
 - **[Connect]** — 매니페스트(`tb3-sim`) 로드 → transport 연결 → init 시퀀스 → `createDriveDevice` → `startHeartbeat` → `drive.enable()`(`!MG`) → `OdometryNode` + `PoseFusionNode` 생성 + bus 구독 배선.
 - **[Start mapping]** — `MapNode`(격자 `gridConfigFromBounds([-1,-1]..[16,12], 0.05m)`, 인플레이션 0.18m) + `PlannerNode`(WASM 로드) + `PathFollowerNode` 생성, 그리고 센서 WS 오픈. 센서 프레임마다: `scan`을 `sim/scan`에 발행, 1.5초마다 ground truth + 가우시안 노이즈를 `sim/correction`에 발행(VPS 대역). 첫 correction 전엔 `scan`을 안 흘려서 MapNode가 (0,0) 콜드스타트 pose에서 래스터화하는 걸 막는다.
 - **캔버스 클릭** — 클릭 좌표를 월드 좌표로 변환 → `mapNode.snapshot()`의 `occupiedInflated`(팽창본)를 `occupied`로, 현재 fused pose를 start로, 클릭점을 goal로 해서 `sim/plan-request` 발행. `PlannerNode` 응답(`sim/plan-result`)이 오면 경로를 `sim/path`에 발행 → `PathFollowerNode`가 pure pursuit로 `sim/drive/cmd_vel` 발행 → 버스 구독이 `drive.setVelocity()` 호출 → 시뮬레이터 주행.
-- rAF 루프가 캔버스에 그린다: 점유격자(벽=검정, 팽창=회색, `MapNode` 발행 때 오프스크린 캔버스로 래스터), fused pose(초록 삼각), odom 고스트(점선), 레이저 스캔점(빨강), 계획 경로(파랑), goal 마커.
+- **[Save map]/[Load map]** — `mapNode.serialize()` ↔ `localStorage["mapnode:nav"]`. Phase 8의 저장/로드.
+- rAF 루프가 캔버스에 그린다: 점유격자를 **확률 grayscale**로(`prob` 필드: p→0 흰색, p≈0.5 미관측 투명, p→1 검정 — `MapNode` 발행 때 오프스크린 `ImageData`로 래스터), 팽창 셀은 반투명 파랑 halo, fused pose(초록), odom 고스트(점선), 레이저 스캔점(빨강), 계획 경로(파랑), goal 마커.
 
 `@ros-chromium/planner-wasm`이 `planner-node.js`에서 bare specifier로 import되므로 — 브라우저엔 패키지 리졸버가 없다 — 페이지 `<head>`의 `<script type="importmap">`로 서빙 경로에 매핑한다. `serve-dashboard.mjs` MIME 맵에 `.wasm`도 추가했다.
 

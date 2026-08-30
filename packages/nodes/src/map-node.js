@@ -1,37 +1,34 @@
-// MapNode — roadmap.md Phase 7's last un-built node: LIDAR scan + pose ->
-// occupancy grid, in exactly the shape pathfinder's grid package consumes.
+// MapNode — LIDAR scan + pose -> occupancy grid (roadmap.md Phase 7/8).
 //
-// "Mapping with known poses" -- the easy half of SLAM (roadmap.md's table:
-// "알려진 pose + 스캔 → 점유격자"). It does NOT localize; it takes whatever
-// pose the bus gives it (OdometryNode's dead-reckoned `odom`, or
-// PoseFusionNode's corrected estimate, or -- in a sim smoke test -- ground
-// truth) and rasterizes each scan from there.
+// "Mapping with known poses" -- the easy half of SLAM. It does NOT localize;
+// it takes whatever pose the bus gives it (OdometryNode's dead-reckoned
+// `odom`, or PoseFusionNode's corrected estimate, or -- in a sim smoke test
+// -- ground truth) and folds each scan into the grid from there.
 //
-// The output object is a drop-in for `@ros-chromium/planner-wasm`'s
-// findPath request and for pathfinder's `grid.NewGridFromOccupancy`:
+// Phase 8: the per-cell estimate is a **log-odds** value, updated by the
+// standard binary Bayes filter (Thrun/Burgard/Fox, "Probabilistic
+// Robotics", occupancy grid mapping):
 //
-//   { originX, originY, cellSize, cols, rows, occupied, occupiedInflated, updatedAt }
+//   L(cell) += l_occ   for the beam's endpoint cell   (p_occ  > 0.5)
+//   L(cell) += l_free  for every cell the beam passed  (p_free < 0.5)
+//   L clamped to [logOdds.min, logOdds.max]   (bounded confidence, so the
+//                                              map can still change later)
+//   p(cell) = 1 - 1/(1 + e^L) ;  L = 0  <=>  p = 0.5  <=>  never observed
 //
-// `occupied` / `occupiedInflated` are row-major boolean arrays of length
-// cols*rows, indexed `row * cols + col`, with the origin at the min corner
-// and `col = floor((x - originX) / cellSize)` -- byte-for-byte the
-// convention in pathfinder/pathfinder/grid/grid.go (CellAt / index), so a
-// path planned over this grid lands where MapNode thinks the walls are.
+// vs. the Phase-7 hit/miss tally this replaces, the win is inertia: a wall
+// seen 30 times isn't erased by one noisy pass-through, and a corridor seen
+// free 30 times isn't turned into a wall by one spurious return. `reset()`,
+// `serialize()` and `load()` let a map be cleared / saved / reloaded.
 //
-// Why two arrays:
-//   - `occupied` is the raw thresholded map -- what the walls actually are.
-//   - `occupiedInflated` is `occupied` dilated by the robot's body radius,
-//     because pathfinder's A* treats the robot as a dimensionless point
-//     (grid.go has no inflation step). PlannerNode requests should pass
-//     `occupiedInflated` as `occupied`; the raw map is kept for display and
-//     for Phase 8's Bayesian accumulation.
-//
-// Occupancy is a plain hit/miss tally per cell, not log-odds -- log-odds
-// accumulation is Phase 8. A cell is "occupied" once it has been a beam
-// endpoint enough times and endpoints outweigh pass-throughs by the
-// configured ratio; everything else (including never-observed cells) is
-// free, which is the safe default for a planner (unknown == traversable
-// only matters until the robot's own scans fill the space in).
+// The published message keeps the Phase-7 shape so PlannerNode and the
+// dashboard are unchanged:
+//   { originX, originY, cellSize, cols, rows,
+//     occupied, occupiedInflated,   // row-major bool[], grid.go's CellAt/index convention
+//     prob,                          // row-major Uint8Array, p*255 (for a grayscale view)
+//     updatedAt }
+// `occupied` is `p > threshold`; `occupiedInflated` is that dilated by the
+// robot body radius (pathfinder's A* treats the robot as a point), with the
+// current pose cell forced free so the planner never rejects the start.
 
 // --- grid geometry: keep every formula identical to pathfinder/grid/grid.go ---
 
@@ -99,8 +96,6 @@ export function castRayCells(cfg, x0, y0, x1, y1) {
   const stepCol = dx > 0 ? 1 : dx < 0 ? -1 : 0;
   const stepRow = dy > 0 ? 1 : dy < 0 ? -1 : 0;
 
-  // parametric distance (in units of t along the segment, t in [0,1]) to the
-  // next cell boundary in each axis, and between successive boundaries.
   const tDeltaCol = dx !== 0 ? Math.abs(1 / dx) : Infinity;
   const tDeltaRow = dy !== 0 ? Math.abs(1 / dy) : Infinity;
 
@@ -114,8 +109,6 @@ export function castRayCells(cfg, x0, y0, x1, y1) {
       : Infinity;
 
   const cells = [{ col, row }];
-  // Bound the walk: Manhattan cell distance + a small slack is always enough,
-  // and guarantees termination even with floating-point boundary ties.
   const maxSteps = Math.abs(endCol - col) + Math.abs(endRow - row) + 2;
   for (let i = 0; i < maxSteps; i++) {
     if (col === endCol && row === endRow) break;
@@ -132,20 +125,37 @@ export function castRayCells(cfg, x0, y0, x1, y1) {
   return cells;
 }
 
-// --- occupancy from tallies --------------------------------------------
+// --- log-odds occupancy ----------------------------------------------
+
+// p_occ 0.7 -> +0.847, p_free 0.4 -> -0.405; clamp keeps confidence bounded
+// so a long-standing wall/corridor can still be revised when the world (or
+// the robot's belief about its pose) changes.
+export const LOGODDS_DEFAULTS = { occ: 0.85, free: -0.4, min: -2.0, max: 3.5, threshold: 0.5 };
+
+const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/** log-odds -> probability of occupied. L=0 -> 0.5. */
+export function probFromLogOdds(l) {
+  return 1 - 1 / (1 + Math.exp(l));
+}
 
 /**
- * Threshold hit/miss tallies into a boolean occupancy array.
- * A cell is occupied iff hits >= minHits AND hits/(hits+misses) >= occRatio.
- * Never-observed cells (hits+misses == 0) are free.
+ * Threshold a log-odds grid to a boolean occupancy array.
+ * `occThreshold` is a probability (default 0.5); never-observed cells (L=0,
+ * p=0.5) are therefore free unless the threshold is pushed below 0.5.
  */
-export function thresholdOccupancy(hits, misses, { minHits = 2, occRatio = 0.2 } = {}) {
-  const n = hits.length;
+export function occupancyFromLogOdds(logOdds, { occThreshold = 0.5 } = {}) {
+  const n = logOdds.length;
   const out = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const h = hits[i];
-    const total = h + misses[i];
-    out[i] = h >= minHits && total > 0 && h / total >= occRatio;
+  for (let i = 0; i < n; i++) out[i] = probFromLogOdds(logOdds[i]) > occThreshold;
+  return out;
+}
+
+/** log-odds grid -> Uint8Array of p*255, for a grayscale render. */
+export function probGridU8(logOdds) {
+  const out = new Uint8Array(logOdds.length);
+  for (let i = 0; i < logOdds.length; i++) {
+    out[i] = Math.round(probFromLogOdds(logOdds[i]) * 255);
   }
   return out;
 }
@@ -179,11 +189,9 @@ export function inflateOccupancy(occupied, cfg, radiusM) {
 
 /**
  * Force every cell within `radiusM` of (x,y) free, in place. At least the
- * cell containing (x,y) is always cleared. This is how MapNode keeps the
- * planner from rejecting requests with "start point is inside an obstacle"
- * when the robot is parked close enough to a wall that inflation bleeds onto
- * it -- a real deployment wants the robot's own footprint treated as known
- * free space anyway.
+ * cell containing (x,y) is always cleared -- keeps the planner from
+ * rejecting "start point is inside an obstacle" when the robot is parked
+ * close enough to a wall that inflation bleeds onto it.
  */
 export function clearDisc(occupied, cfg, x, y, radiusM) {
   const { col: c0, row: r0 } = worldToCell(cfg, x, y);
@@ -203,29 +211,63 @@ export function clearDisc(occupied, cfg, x, y, radiusM) {
   return occupied;
 }
 
+// --- serialize / load (save & reload a built map) --------------------
+
+const SERIAL_FORMAT = 'mapnode-logodds-v1';
+const SERIAL_SCALE = 32; // int8 quantization: covers L in ~[-3.97, 3.97]
+
+const B64 = typeof btoa === 'function'
+  ? { enc: (u8) => btoa(String.fromCharCode(...u8)), dec: (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)) }
+  : { enc: (u8) => Buffer.from(u8).toString('base64'), dec: (s) => new Uint8Array(Buffer.from(s, 'base64')) };
+
+/** @param {{originX,originY,cellSize,cols,rows}} cfg @param {Float32Array} logOdds */
+export function serializeMap(cfg, logOdds) {
+  const q = new Int8Array(logOdds.length);
+  for (let i = 0; i < logOdds.length; i++) {
+    q[i] = clamp(Math.round(logOdds[i] * SERIAL_SCALE), -127, 127);
+  }
+  return {
+    format: SERIAL_FORMAT,
+    originX: cfg.originX, originY: cfg.originY, cellSize: cfg.cellSize,
+    cols: cfg.cols, rows: cfg.rows, scale: SERIAL_SCALE,
+    data: B64.enc(new Uint8Array(q.buffer)),
+    savedAt: Date.now(),
+  };
+}
+
+/** @returns {{ cfg, logOdds: Float32Array }} */
+export function deserializeMap(obj) {
+  if (!obj || obj.format !== SERIAL_FORMAT) {
+    throw new Error(`deserializeMap: not a ${SERIAL_FORMAT} object`);
+  }
+  const n = obj.cols * obj.rows;
+  const q = new Int8Array(B64.dec(obj.data).buffer);
+  if (q.length !== n) throw new Error(`deserializeMap: data length ${q.length} != cols*rows ${n}`);
+  const logOdds = new Float32Array(n);
+  for (let i = 0; i < n; i++) logOdds[i] = q[i] / (obj.scale || SERIAL_SCALE);
+  return {
+    cfg: { originX: obj.originX, originY: obj.originY, cellSize: obj.cellSize, cols: obj.cols, rows: obj.rows },
+    logOdds,
+  };
+}
+
 // --- the node -----------------------------------------------------------
 
 export class MapNode {
   /**
    * @param {object} bus - LocalBus
    * @param {object} opts
-   * @param {string} opts.scanTopic - LaserScan-like msgs:
+   * @param {string} opts.scanTopic - LaserScan-like msgs
    *   { angleMin, angleIncrement, rangeMin, rangeMax, ranges:number[] }.
-   *   Beam i's world bearing is pose.theta + angleMin + i*angleIncrement;
-   *   a range >= rangeMax means "no return" (clears space, marks no wall).
    * @param {string} opts.poseTopic - {x,y,theta} in the grid's world frame.
-   *   The most recent pose seen is paired with each incoming scan.
    * @param {string} opts.mapTopic - where the occupancy grid object is published.
-   * @param {{originX:number,originY:number,cellSize:number,cols:number,rows:number}} opts.grid
-   *   - see gridConfigFromBounds().
-   * @param {number} [opts.inflationRadius=0] - metres to dilate walls by for
-   *   `occupiedInflated` (typically the robot body radius + a margin).
-   * @param {number} [opts.robotClearRadius=inflationRadius] - metres around the
-   *   current pose forced free in `occupiedInflated`.
-   * @param {{minHits?:number, occRatio?:number}} [opts.threshold]
-   * @param {number} [opts.publishHz=2] - max map-publish rate; a publish only
-   *   happens when at least one scan has been integrated since the last one.
-   * @param {(map:object)=>void} [opts.onUpdate] - called with each published map.
+   * @param {{originX,originY,cellSize,cols,rows}} opts.grid - see gridConfigFromBounds().
+   * @param {number} [opts.inflationRadius=0]
+   * @param {number} [opts.robotClearRadius=inflationRadius]
+   * @param {{occ?,free?,min?,max?,threshold?}} [opts.logOdds] - binary-Bayes params,
+   *   see LOGODDS_DEFAULTS.
+   * @param {number} [opts.publishHz=2]
+   * @param {(map:object)=>void} [opts.onUpdate]
    */
   constructor(bus, {
     scanTopic,
@@ -234,7 +276,7 @@ export class MapNode {
     grid,
     inflationRadius = 0,
     robotClearRadius,
-    threshold,
+    logOdds,
     publishHz = 2,
     onUpdate,
   } = {}) {
@@ -244,31 +286,25 @@ export class MapNode {
     this._bus = bus;
     this._mapTopic = mapTopic;
     this._cfg = {
-      originX: grid.originX,
-      originY: grid.originY,
-      cellSize: grid.cellSize,
-      cols: grid.cols,
-      rows: grid.rows,
+      originX: grid.originX, originY: grid.originY, cellSize: grid.cellSize,
+      cols: grid.cols, rows: grid.rows,
     };
     this._inflationRadius = inflationRadius;
     this._robotClearRadius = robotClearRadius ?? inflationRadius;
-    this._threshold = threshold;
+    this._lo = { ...LOGODDS_DEFAULTS, ...(logOdds || {}) };
     this._onUpdate = onUpdate;
 
-    const n = this._cfg.cols * this._cfg.rows;
-    this._hits = new Uint16Array(n);
-    this._misses = new Uint16Array(n);
+    this._logOdds = new Float32Array(this._cfg.cols * this._cfg.rows);
     this._pose = null;
     this._dirty = false;
 
-    this._unsubPose = bus.subscribe(poseTopic, (pose) => {
-      this._pose = pose;
-    });
+    this._unsubPose = bus.subscribe(poseTopic, (pose) => { this._pose = pose; });
     this._unsubScan = bus.subscribe(scanTopic, (scan) => this._integrate(scan));
+    this._timer = setInterval(() => { if (this._dirty) this._publish(); }, 1000 / publishHz);
+  }
 
-    this._timer = setInterval(() => {
-      if (this._dirty) this._publish();
-    }, 1000 / publishHz);
+  _bump(idx, delta) {
+    this._logOdds[idx] = clamp(this._logOdds[idx] + delta, this._lo.min, this._lo.max);
   }
 
   _integrate(scan) {
@@ -280,27 +316,20 @@ export class MapNode {
 
     for (let i = 0; i < scan.ranges.length; i++) {
       const r = scan.ranges[i];
-      if (!(r > rangeMin)) continue; // invalid / too-close beam: no information
+      if (!(r > rangeMin)) continue; // invalid / too-close beam
       const noReturn = r >= noReturnAt;
       const reach = noReturn ? rangeMax : r;
       const a = theta + angleMin + i * angleIncrement;
-      const ex = x + reach * Math.cos(a);
-      const ey = y + reach * Math.sin(a);
+      const cells = castRayCells(cfg, x, y, x + reach * Math.cos(a), y + reach * Math.sin(a));
 
-      const cells = castRayCells(cfg, x, y, ex, ey);
-      // every cell the beam crossed is free space...
       const lastIdx = cells.length - 1;
       for (let k = 0; k < lastIdx; k++) {
         const { col, row } = cells[k];
-        if (inBounds(cfg, col, row)) this._misses[cellIndex(cfg, col, row)]++;
+        if (inBounds(cfg, col, row)) this._bump(cellIndex(cfg, col, row), this._lo.free);
       }
-      // ...and the final cell holds a wall, unless the beam simply ran out of
-      // range (no return -> that last cell is just more free space).
       const end = cells[lastIdx];
       if (inBounds(cfg, end.col, end.row)) {
-        const idx = cellIndex(cfg, end.col, end.row);
-        if (noReturn) this._misses[idx]++;
-        else this._hits[idx]++;
+        this._bump(cellIndex(cfg, end.col, end.row), noReturn ? this._lo.free : this._lo.occ);
       }
     }
     this._dirty = true;
@@ -309,19 +338,17 @@ export class MapNode {
   /** Build the current occupancy grid message without waiting for the timer. */
   snapshot() {
     const cfg = this._cfg;
-    const occupied = thresholdOccupancy(this._hits, this._misses, this._threshold);
-    let occupiedInflated = inflateOccupancy(occupied, cfg, this._inflationRadius);
+    const occupied = occupancyFromLogOdds(this._logOdds, { occThreshold: this._lo.threshold });
+    const occupiedInflated = inflateOccupancy(occupied, cfg, this._inflationRadius);
     if (this._pose) {
       clearDisc(occupiedInflated, cfg, this._pose.x, this._pose.y, this._robotClearRadius);
     }
     return {
-      originX: cfg.originX,
-      originY: cfg.originY,
-      cellSize: cfg.cellSize,
-      cols: cfg.cols,
-      rows: cfg.rows,
+      originX: cfg.originX, originY: cfg.originY, cellSize: cfg.cellSize,
+      cols: cfg.cols, rows: cfg.rows,
       occupied,
       occupiedInflated,
+      prob: probGridU8(this._logOdds),
       updatedAt: Date.now(),
     };
   }
@@ -333,10 +360,33 @@ export class MapNode {
     if (this._onUpdate) this._onUpdate(map);
   }
 
+  /** A save blob: grid config + quantized log-odds (see serializeMap). */
+  serialize() {
+    return serializeMap(this._cfg, this._logOdds);
+  }
+
+  /**
+   * Replace the current map with a saved one. The saved grid config must
+   * match this node's (same origin/cellSize/cols/rows) -- otherwise the
+   * cells wouldn't line up. Returns this.
+   */
+  load(saved) {
+    const { cfg, logOdds } = deserializeMap(saved);
+    const c = this._cfg;
+    const same = cfg.cols === c.cols && cfg.rows === c.rows
+      && Math.abs(cfg.originX - c.originX) < 1e-9 && Math.abs(cfg.originY - c.originY) < 1e-9
+      && Math.abs(cfg.cellSize - c.cellSize) < 1e-12;
+    if (!same) {
+      throw new Error('MapNode.load: saved grid config does not match this node\'s grid');
+    }
+    this._logOdds.set(logOdds);
+    this._dirty = true;
+    return this;
+  }
+
   /** Drop all accumulated evidence (e.g. on teleport / relocalization). */
   reset() {
-    this._hits.fill(0);
-    this._misses.fill(0);
+    this._logOdds.fill(0);
     this._dirty = false;
   }
 
