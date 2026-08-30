@@ -16,11 +16,15 @@ Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토�
 
 `firmware/sim/src/roboteq.js`와 바이트 단위로 동일해야 한다(의도된 복제 — `former-motor-protocol.md`가 공통 소스). 상세는 펌웨어 레포 `source-explained.md`에도 같은 내용으로 있다.
 
+## packages/transport/src/codecs.js
+
+와이어 프로토콜 코덱 레지스트리 — 매니페스트 `transport.kind`로 고른다. 코덱 = `{ Decoder, encode }`: `Decoder`는 `new Decoder().push(bytes)`로 정규화 메시지(`{type:'ack'|'reply'|'line',...}`)를 내는 클래스, `encode(spec)`은 명령 하나를 와이어 바이트로. `getCodec(kind='roboteq-serial')`가 조회하고 미등록 kind면 throw. 지금 등록된 건 `roboteq-serial`(`RoboteqDecoder` + `encodeCommand`) 하나. TB3 OpenCR(DYNAMIXEL Protocol 2.0)를 붙일 땐 여기 `turtlebot3-opencr` 항목 하나 추가 — `Decoder`가 엔코더 응답을 똑같이 `{type:'reply',key:'C',values:[l,r]}`로 내면 `OdometryNode`도 무변경. transport 3종(`WebSocket`/`WebSerial`/`Rtc`)이 생성자에서 `{ codec = getCodec() }`를 받아 `this._decoder = new codec.Decoder()`를 만들고 `encode(spec)` 메서드를 노출하므로, `packages/nodes`·`device-abstraction`·`rtc-host-bridge`는 코덱을 직접 import하지 않는다. roadmap.md "세 타깃 동시 진행" 참고.
+
 ## packages/transport/src/websocket-transport.js
 
 **시뮬레이터** 상대 테스트용 `HardwareTransport` 구현체. 전역 `WebSocket`(브라우저 + Node 22+)만 써서 브라우저 탭에서도 Node 스크립트에서도 수정 없이 돈다 — `apps/dashboard/index.html`(local 모드), `host.html`(simulator 모드), `scripts/*.mjs`가 같은 클래스를 쓴다.
 
-`RoboteqDecoder` 하나를 들고 있다가, `onmessage`로 바이트가 들어오면 (1) 먼저 raw 바이트 그대로 `onRaw` 콜백들에 넘기고 (2) 디코더에 밀어넣어 나온 파싱 메시지를 `onMessage` 콜백들에 넘긴다. `onRaw`는 파싱하지 않고 바이트만 중계해야 하는 곳(`RtcHostBridge`)을 위한 것이다.
+생성자에서 `{ codec = getCodec() }`(기본 Roboteq)를 받아 `codec.Decoder` 하나를 들고 있다가, `onmessage`로 바이트가 들어오면 (1) 먼저 raw 바이트 그대로 `onRaw` 콜백들에 넘기고 (2) 디코더에 밀어넣어 나온 파싱 메시지를 `onMessage` 콜백들에 넘긴다. `onRaw`는 파싱하지 않고 바이트만 중계해야 하는 곳(`RtcHostBridge`)을 위한 것이다. `encode(spec)`은 코덱의 `encode`에 위임한다.
 
 `connect()`는 `onopen`에서 resolve, `onclose`에서 disconnect 콜백. `send()`는 `ws.send(frame)`. `close()`는 인터페이스의 선택적 부분 — 정상 종료 핸드셰이크를 보내는 의도적 종료다. "크래시처럼 인사 없이 끊기"를 재현하려면 `close()`를 부르지 않고 프로세스/페이지를 죽여야 하고(`prototype-client.mjs`가 그렇게 한다), `RtcHostBridge`는 operator 세션을 깔끔히 끝낼 때 쓴다.
 
@@ -28,7 +32,7 @@ Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토�
 
 **실제 Roboteq 컨트롤러** 상대 `HardwareTransport` 구현체 — `navigator.serial`로 로봇 자기 PC의 `/dev/ttyMOTOR`(115200 8N1)를 연다. `WebSocketTransport`와 완전히 같은 모양(`connect`/`send`/`onMessage`/`onRaw`/`onDisconnect`/`close`)이라 `RtcHostBridge`·`createDriveDevice`는 둘 중 뭘 받든 상관 안 한다. Chromium 전용 + secure context(localhost 포함) 필요. Node에서 못 돌려서 `node --check`만, 실검증은 로봇에서 사람이.
 
-`connect()`: 이미 승인된 포트가 정확히 하나면 그걸 재사용(재부팅 후 프롬프트 없음), 아니면 `navigator.serial.requestPort()`로 피커를 띄운다 — `filters`(Former FTDI 어댑터 `0x0403`/`0x6001`)로 피커를 좁힌다. 열고 나서 `writable.getWriter()`로 쓰고, `readable.getReader()`를 돌리는 `_readLoop()`가 들어온 청크를 `onRaw` → `RoboteqDecoder` → `onMessage` 순으로 흘린다. 포트 물리적 분리는 `disconnect` 이벤트로, 스트림 종료/에러는 read 루프의 `finally`에서 `onDisconnect`로 통지. `close()`는 reader cancel → writer close → port close 순.
+생성자는 `WebSocketTransport`와 같은 `{ codec = getCodec() }`를 받고 `encode(spec)`을 노출한다. `connect()`: 이미 승인된 포트가 정확히 하나면 그걸 재사용(재부팅 후 프롬프트 없음), 아니면 `navigator.serial.requestPort()`로 피커를 띄운다 — `filters`(Former FTDI 어댑터 `0x0403`/`0x6001`)로 피커를 좁힌다. 열고 나서 `writable.getWriter()`로 쓰고, `readable.getReader()`를 돌리는 `_readLoop()`가 들어온 청크를 `onRaw` → `codec.Decoder` → `onMessage` 순으로 흘린다. 포트 물리적 분리는 `disconnect` 이벤트로, 스트림 종료/에러는 read 루프의 `finally`에서 `onDisconnect`로 통지. `close()`는 reader cancel → writer close → port close 순.
 
 매 부팅 프롬프트를 없애려면 엔터프라이즈 정책 `SerialAllowUsbDevicesForUrls`(대시보드 origin + FTDI VID/PID)를 깔아야 한다. 이 파일에도 그 주석이 있다.
 
@@ -38,7 +42,7 @@ Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토�
 
 ## packages/transport/src/index.js
 
-`roboteq.js`, `websocket-transport.js`, `web-serial-transport.js`, `heartbeat.js`를 재수출한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스 모양(`connect`/`send`/`onMessage`/`onDisconnect`, 선택적 `onRaw`/`close`)과 와이어 프로토콜이 Roboteq라는 것, 그리고 두 구현체(`WebSocketTransport` = 시뮬레이터, `WebSerialTransport` = 실기)를 적어뒀다. 그 위 코드(device-abstraction, nodes, dashboard)는 transport 구현을 갈아끼워도 안 건드리는 게 이 인터페이스를 둔 이유다.
+`roboteq.js`, `codecs.js`, `websocket-transport.js`, `web-serial-transport.js`, `heartbeat.js`를 재수출한다. 파일 맨 위 주석에 `HardwareTransport` 인터페이스 모양(`connect`/`send`/`encode`/`onMessage`/`onDisconnect`, 선택적 `onRaw`/`close`)과 와이어 프로토콜이 매니페스트 `transport.kind`로 선택된다는 것(지금은 Roboteq 하나), 그리고 두 구현체(`WebSocketTransport` = 시뮬레이터, `WebSerialTransport` = 실기)를 적어뒀다. 그 위 코드(device-abstraction, nodes, dashboard)는 transport 구현이나 코덱을 갈아끼워도 안 건드리는 게 이 인터페이스를 둔 이유다.
 
 ## packages/bus/src/local-bus.js
 
@@ -66,7 +70,7 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 `setVelocity(left, right)`는 정규화 [-1, 1](TeleopNode·슬라이더가 내는 값)을 받아 `toUnits`로 `±scale`(Former은 1000 = ±200 바퀴 RPM)로 클램프한 뒤, `drive.commands.setVelocity` 템플릿의 `${ch.left}`/`${ch.right}`/`${v.left}`/`${v.right}` 자리를 채워 보낸다 — Former 매니페스트에선 `"!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"` → `!G 1 500_!G 2 -300` 식. `enable()`/`estop()`은 템플릿이 있으면 그대로 보내고 없으면 no-op(연결/ESTOP/워치독 이후 모터가 비활성으로 시작하므로 연결 후 `enable()` 한 번 필요; 매니페스트에 `!MG`/`!EX`).
 
-매니페스트에 **일부러 안 넣은 것** 두 가지: (1) 바이트 인코딩(라인 종결자·프레이밍)은 와이어 프로토콜 소관이라 `encodeCommand`가 코덱(`roboteq.js`)에서 온다 — 지금은 코덱이 Roboteq 하나뿐이고, 두 번째 와이어 프로토콜이 생기면 `manifest.transport.kind`로 코덱을 고른다. (2) 정규화 [-1, 1] 규약은 스택 전역 계약이라 코드에 둔다. 실단위(m/s) API는 별도 후속.
+매니페스트에 **일부러 안 넣은 것** 두 가지: (1) 바이트 인코딩(라인 종결자·프레이밍)은 와이어 프로토콜 소관이라 `transport.encode()`(= `manifest.transport.kind`로 고른 코덱)에서 온다 — 이 파일은 프로토콜을 import하지 않는다. (2) 정규화 [-1, 1] 규약은 스택 전역 계약이라 코드에 둔다. 실단위(m/s) API는 별도 후속.
 
 속도 리드백(`drive.readback.encoder = "?C"`)은 `?C` 카운트 델타로 바퀴 속도를 뽑는 폴 루프가 아직 없어서 TODO.
 
@@ -119,7 +123,7 @@ WebRTC 시그널링만 하는 최소 WebSocket 서버. robot id 하나가 "방" 
 
 ## packages/rtc/src/rtc-transport.js
 
-원격 세션의 operator 쪽. `WebSocketTransport`와 똑같은 `connect`/`send`/`onMessage`/`onDisconnect` 모양을 구현해서, 대시보드가 원격 로봇을 로컬 로봇과 같은 코드로 몬다 — transport 생성자만 바뀐다(`HardwareBridgeClient`가 Phase 4에서 한 것과 같은 수법, 한 홉 더 밖). operator가 능동적인 쪽이라 `RTCPeerConnection`과 데이터채널을 만들고 offer를 보낸다(host는 answer만; 역할이 고정이라 perfect-negotiation 안 함). host가 이미 방에 있으면 바로 offer하고, 없으면 `peer-joined`를 기다린다. 들어오는 데이터채널 메시지는 `RoboteqDecoder`를 거쳐 파싱된 메시지로 나온다(`WebSocketTransport`와 같은 디코딩 경로 재사용).
+원격 세션의 operator 쪽. `WebSocketTransport`와 똑같은 `connect`/`send`/`onMessage`/`onDisconnect` 모양을 구현해서, 대시보드가 원격 로봇을 로컬 로봇과 같은 코드로 몬다 — transport 생성자만 바뀐다(`HardwareBridgeClient`가 Phase 4에서 한 것과 같은 수법, 한 홉 더 밖). operator가 능동적인 쪽이라 `RTCPeerConnection`과 데이터채널을 만들고 offer를 보낸다(host는 answer만; 역할이 고정이라 perfect-negotiation 안 함). host가 이미 방에 있으면 바로 offer하고, 없으면 `peer-joined`를 기다린다. 생성자는 `WebSocketTransport`처럼 `{ codec = getCodec() }`를 받고 `encode(spec)`을 노출한다. 들어오는 데이터채널 메시지는 `codec.Decoder`를 거쳐 파싱된 메시지로 나온다(`WebSocketTransport`와 같은 디코딩 경로 재사용).
 
 이 transport는 **자체 keepalive가 없다**. operator 대시보드가 `startHeartbeat(rtcTransport)`를 직접 돈다 — keepalive(`!B 3 1`)가 operator 자신의 링크를 타야, operator가 얼거나 끊겼을 때 Roboteq RWD 워치독이 ~1초 뒤 모터를 0으로 만든다. host가 대신 보내면 이 보장이 깨진다. ICE 서버는 지금 공용 STUN 하나뿐이고, 크로스-NAT용 TURN과 LAN WebSocket 릴레이 폴백은 아직 미결(`plan.md` "아직 정하지 않은 것").
 

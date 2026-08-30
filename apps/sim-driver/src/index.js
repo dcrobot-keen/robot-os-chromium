@@ -44,7 +44,7 @@
 //      the VPS-like correction fires, default 2000ms to match
 //      vps-capture.html's default cadence).
 import { readFile } from 'node:fs/promises';
-import { WebSocketTransport, startHeartbeat, encodeCommand } from '@ros-chromium/transport';
+import { WebSocketTransport, startHeartbeat } from '@ros-chromium/transport';
 import { createDriveDevice } from '@ros-chromium/device-abstraction';
 import { LocalBus } from '@ros-chromium/bus';
 import { PathFollowerNode, OdometryNode, PoseFusionNode, MapNode, gridConfigFromBounds } from '@ros-chromium/nodes';
@@ -107,7 +107,7 @@ const drive = createDriveDevice(transport, manifest);
 // createDriveDevice doesn't send the init sequence itself (see its header
 // comment) -- roboteq-smoke.mjs is the reference for doing this by hand.
 for (const line of manifest.drive.commands.init ?? []) {
-  await transport.send(encodeCommand(line));
+  await transport.send(transport.encode(line));
   await new Promise((r) => setTimeout(r, 30));
 }
 await drive.enable();
@@ -125,8 +125,12 @@ bus.subscribe(CMD_TOPIC, async ({ left, right }) => {
 });
 
 // --- odometry + fusion: dead-reckon from encoders, correct periodically ---
-// eslint-disable-next-line no-new -- polls "?C" on transport and publishes to the bus itself
-new OdometryNode(bus, transport, { poseTopic: ODOM_TOPIC, geometry: manifest.drive.geometry });
+// eslint-disable-next-line no-new -- polls the encoder query on transport and publishes to the bus itself
+new OdometryNode(bus, transport, {
+  poseTopic: ODOM_TOPIC,
+  geometry: manifest.drive.geometry,
+  encoderQuery: manifest.drive.readback?.encoder, // "?C" for Roboteq; undefined -> node default
+});
 
 // eslint-disable-next-line no-new -- wires itself up via the bus subscriptions in its constructor
 new PoseFusionNode(bus, {

@@ -28,8 +28,10 @@
 // exclusive, so 2+ simultaneous operators would need the bridge to hold ONE
 // shared transport (like the SharedWorker does for tabs) — out of scope
 // while Phase 5 is single-operator (plan.md).
-
-import { encodeCommand } from '../../transport/src/roboteq.js';
+//
+// The per-operator firmware transport comes from the injected makeTransport
+// factory; init commands are encoded with that transport's own codec
+// (firmware.encode), so this file is not tied to a wire protocol.
 
 const DEFAULT_RTC_CONFIG = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
@@ -107,7 +109,7 @@ export class RtcHostBridge {
         // Controller bring-up (Roboteq: ^ECHOF 1 / !R 2 / !AC / !DC). Spaced
         // like the reference ROS driver; skipped when initCommands is empty.
         for (const line of this._initCommands) {
-          await firmware.send(encodeCommand(line));
+          await firmware.send(firmware.encode(line));
           await sleep(100);
         }
         this._onEvent({ type: 'firmware-connected', operatorId });

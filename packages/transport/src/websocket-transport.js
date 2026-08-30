@@ -4,23 +4,30 @@
 // (browser, and Node 22+) so the exact same class runs unmodified in a
 // Chromium tab and in a Node.js test client.
 //
-// The payload on the wire is now the Roboteq ASCII line protocol
-// (former-motor-protocol.md): send() takes the bytes of a command line
-// (build them with encodeCommand from roboteq.js); onMessage() delivers
-// parsed replies ({type:'ack'|'reply'|'line', ...}); onRaw() delivers the
-// undecoded bytes, for a pass-through relay that must not parse (the
-// Phase 5 RtcHostBridge).
+// The payload on the wire is decided by the injected codec (defaults to
+// Roboteq ASCII, former-motor-protocol.md): send() takes wire bytes (build
+// them with transport.encode(spec), or encodeCommand from roboteq.js);
+// onMessage() delivers parsed replies ({type:'ack'|'reply'|'line', ...});
+// onRaw() delivers the undecoded bytes, for a pass-through relay that must
+// not parse (the Phase 5 RtcHostBridge).
 
-import { RoboteqDecoder } from './roboteq.js';
+import { getCodec } from './codecs.js';
 
 export class WebSocketTransport {
-  constructor(url) {
+  constructor(url, { codec = getCodec() } = {}) {
     this._url = url;
     this._ws = null;
-    this._decoder = new RoboteqDecoder();
+    this._codec = codec;
+    this._decoder = new codec.Decoder();
     this._messageHandlers = [];
     this._rawHandlers = [];
     this._disconnectHandlers = [];
+  }
+
+  // Encode one command to wire bytes with this transport's codec, so callers
+  // (OdometryNode's "?C" poll, etc.) don't import a protocol-specific module.
+  encode(spec) {
+    return this._codec.encode(spec);
   }
 
   connect() {

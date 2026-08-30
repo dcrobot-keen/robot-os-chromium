@@ -3,6 +3,6 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "HardwareTransport interface, the wire protocol codec shared with firmware, and the transport implementations (WebSerial done last, since it needs real hardware — see plan.md Phase 1/2).",
+  "description": "HardwareTransport interface + encode(), the wire-protocol codec registry (codecs.js, keyed by manifest transport.kind; Roboteq codec shared byte-for-byte with firmware), and the transport implementations (WebSocket/WebSerial/heartbeat). See plan.md Phase 1/2 and roadmap.md '세 타깃 동시 진행'.",
   "main": "src/index.js"
 }

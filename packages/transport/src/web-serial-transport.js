@@ -16,23 +16,31 @@
 // one port has already been granted, connect() reuses it without
 // prompting.
 
-import { RoboteqDecoder } from './roboteq.js';
+import { getCodec } from './codecs.js';
 
 export class WebSerialTransport {
   // filters: [{ usbVendorId, usbProductId }] passed to requestPort() so the
   // picker is pre-narrowed. Former's motor adapter: 0x0403 / 0x6001.
-  constructor({ baudRate = 115200, filters = [] } = {}) {
+  // codec: from getCodec(manifest.transport.kind); defaults to Roboteq.
+  constructor({ baudRate = 115200, filters = [], codec = getCodec() } = {}) {
     this._baudRate = baudRate;
     this._filters = filters;
     this._port = null;
     this._reader = null;
     this._writer = null;
-    this._decoder = new RoboteqDecoder();
+    this._codec = codec;
+    this._decoder = new codec.Decoder();
     this._messageHandlers = [];
     this._rawHandlers = [];
     this._disconnectHandlers = [];
     this._closing = false;
     this._disconnected = false;
+  }
+
+  // Encode one command to wire bytes with this transport's codec (see the
+  // matching method on WebSocketTransport).
+  encode(spec) {
+    return this._codec.encode(spec);
   }
 
   async connect() {

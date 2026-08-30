@@ -9,14 +9,12 @@
 //
 // What is NOT in the manifest, by design:
 //   - the byte encoding (line terminator, framing) — that belongs to the
-//     wire protocol, so encodeCommand comes from the codec. Today the only
-//     codec is Roboteq's; when a second wire protocol appears, select it by
-//     manifest.transport.kind.
+//     wire protocol, so it comes from the transport's codec via
+//     transport.encode(), selected by manifest.transport.kind (codecs.js).
+//     This file has no protocol import.
 //   - the [-1, 1] normalized-velocity convention — a stack-wide contract
 //     (what TeleopNode and the sliders produce). drive.scale maps it to
 //     wire units. A real-units (m/s) API is a separate follow-up.
-
-import { encodeCommand } from '../../transport/src/roboteq.js';
 
 // Fill ${a.b} references in a manifest command template from `vars`.
 function fillTemplate(tpl, vars) {
@@ -36,7 +34,7 @@ export function createDriveDevice(transport, manifest) {
   }
   const channels = drive.channels ?? { left: 1, right: 2 };
   const scale = drive.scale ?? 1000;
-  const send = (line) => transport.send(encodeCommand(line));
+  const send = (line) => transport.send(transport.encode(line));
 
   // normalized [-1, 1] -> wire units, clamped
   const toUnits = (v) => Math.max(-scale, Math.min(scale, Math.round(v * scale)));

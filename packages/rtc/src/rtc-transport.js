@@ -17,7 +17,7 @@
 // cable, now across a WebRTC link. The host never keepalives on the
 // operator's behalf.
 
-import { RoboteqDecoder } from '../../transport/src/roboteq.js';
+import { getCodec } from '../../transport/src/codecs.js';
 
 const DEFAULT_RTC_CONFIG = {
   // A public STUN server covers same-LAN / simple-NAT cases. Cross-NAT
@@ -27,16 +27,21 @@ const DEFAULT_RTC_CONFIG = {
 };
 
 export class RtcTransport {
-  constructor(signalingClient, { rtcConfig = DEFAULT_RTC_CONFIG } = {}) {
+  constructor(signalingClient, { rtcConfig = DEFAULT_RTC_CONFIG, codec = getCodec() } = {}) {
     this._sig = signalingClient;
     this._rtcConfig = rtcConfig;
     this._pc = null;
     this._dc = null;
     this._hostPeerId = null;
-    this._decoder = new RoboteqDecoder();
+    this._codec = codec;
+    this._decoder = new codec.Decoder();
     this._messageHandlers = [];
     this._disconnectHandlers = [];
     this._disconnected = false;
+  }
+
+  encode(spec) {
+    return this._codec.encode(spec);
   }
 
   async connect() {

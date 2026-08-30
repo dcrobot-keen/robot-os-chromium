@@ -60,6 +60,7 @@ const TB3_GEOMETRY = { wheelRadius: 0.033, wheelSeparation: 0.16, countsPerRev: 
       onMessageCb = cb;
     },
     send() {},
+    encode: (spec) => spec, // identity — this test never inspects the wire bytes
   };
 
   const node = new OdometryNode(bus, fakeTransport, { poseTopic: 'odom', geometry: TB3_GEOMETRY, pollHz: 1000 });

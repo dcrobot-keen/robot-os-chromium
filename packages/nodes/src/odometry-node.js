@@ -1,15 +1,17 @@
 // OdometryNode — roadmap.md Phase 7's "OdometryNode: 엔코더 → odom pose".
 //
-// Polls the Roboteq controller's encoder counts (`?C`, already answered by
-// both robot-base/sim and ros-chromium/simulator, but never consumed by any
-// JS client until now — see device-abstraction/drive-device.js's TODO
-// comment on readback) and dead-reckons a pose from the count deltas using
-// standard differential-drive odometry. This pose is *relative to wherever
-// OdometryNode started counting* and drifts over time/distance — it is not
-// a substitute for an absolute fix, which is exactly why PoseFusionNode
-// exists (see pose-fusion-node.js) to combine this with periodic corrections.
-
-import { encodeCommand } from '../../transport/src/roboteq.js';
+// Polls the motor controller's encoder counts and dead-reckons a pose from
+// the count deltas using standard differential-drive odometry. This pose is
+// *relative to wherever OdometryNode started counting* and drifts over
+// time/distance — it is not a substitute for an absolute fix, which is
+// exactly why PoseFusionNode exists (see pose-fusion-node.js) to combine
+// this with periodic corrections.
+//
+// Protocol-agnostic: the query string comes from the manifest
+// (`drive.readback.encoder` — "?C" for Roboteq) and is turned into wire
+// bytes by `transport.encode()`, so this node has no codec import. The
+// decoder is expected to surface counts as `{type:'reply', key:'C',
+// values:[left,right]}` regardless of wire protocol (see codecs.js).
 
 // Wheel rotation (radians, from encoder counts) -> linear distance travelled
 // by that wheel (meters). Pure function so the arithmetic is unit-testable
@@ -40,21 +42,28 @@ export function integrateOdometry(pose, wheelDistances, geometry) {
 }
 
 export class OdometryNode {
-  constructor(bus, transport, { poseTopic, geometry, pollHz = 20 } = {}) {
+  constructor(
+    bus,
+    transport,
+    { poseTopic, geometry, pollHz = 20, encoderQuery = '?C', encoderReplyKey = 'C' } = {},
+  ) {
     if (!poseTopic || !geometry) {
       throw new Error('OdometryNode requires poseTopic and geometry');
     }
     this._bus = bus;
     this._poseTopic = poseTopic;
     this._geometry = geometry;
+    this._encoderQuery = encoderQuery;
     this._pose = { x: 0, y: 0, theta: 0 };
     this._lastCounts = null;
 
     // Roboteq ASCII has no request/response correlation (no message ids) --
     // every "?C" reply just shows up as the next "C=..." line, same pattern
     // roboteq-smoke.mjs already relies on for "?FID" during the handshake.
+    // A different codec surfaces its encoder read under whatever key it
+    // chooses; pass encoderReplyKey to match it.
     this._onMessage = (msg) => {
-      if (msg.type !== 'reply' || msg.key !== 'C' || msg.values.length < 2) return;
+      if (msg.type !== 'reply' || msg.key !== encoderReplyKey || msg.values.length < 2) return;
       const counts = { left: msg.values[0], right: msg.values[1] };
       if (this._lastCounts) {
         const delta = {
@@ -71,7 +80,7 @@ export class OdometryNode {
 
     this._transport = transport;
     this._interval = setInterval(() => {
-      transport.send(encodeCommand('?C'));
+      transport.send(transport.encode(this._encoderQuery));
     }, 1000 / pollHz);
   }
 
