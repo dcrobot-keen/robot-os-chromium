@@ -90,3 +90,56 @@ export class SignalingClient {
     this._ws?.close();
   }
 }
+
+// FleetMonitor — plan.md's last step ("로봇 레지스트리 기능만 얹어 플릿
+// 대시보드를 완성"). A monitor is neither a host nor an operator, and the
+// server's `hello` only accepts those two roles, so this deliberately skips
+// hello entirely — apps/signaling-server's `list` handler answers any
+// connected socket regardless of registration state. It just opens a
+// WebSocket and polls `{type:'list'}` on an interval, handing the `robots`
+// array (each `{robot, online, operators, manifest}`, straight from the
+// server's `robotList()`) to onUpdate every time a reply comes back. New
+// robots (or ones that went offline) show up automatically on the next
+// poll — no dashboard code change needed per robot, which is exactly
+// plan.md's pass criterion.
+export class FleetMonitor {
+  constructor(url, { intervalMs = 2000 } = {}) {
+    this._url = url;
+    this._intervalMs = intervalMs;
+    this._ws = null;
+    this._timer = null;
+    this._updateHandlers = [];
+    this._closeHandlers = [];
+  }
+
+  connect() {
+    const ws = new WebSocket(this._url);
+    this._ws = ws;
+    ws.onopen = () => {
+      this._poll();
+      this._timer = setInterval(() => this._poll(), this._intervalMs);
+    };
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(typeof event.data === 'string' ? event.data : event.data.toString());
+      if (msg.type === 'robots') {
+        for (const cb of this._updateHandlers) cb(msg.robots);
+      }
+    };
+    ws.onclose = () => {
+      clearInterval(this._timer);
+      for (const cb of this._closeHandlers) cb();
+    };
+  }
+
+  _poll() {
+    if (this._ws.readyState === this._ws.OPEN) this._ws.send(JSON.stringify({ type: 'list' }));
+  }
+
+  onUpdate(cb) { this._updateHandlers.push(cb); }
+  onClose(cb) { this._closeHandlers.push(cb); }
+
+  close() {
+    clearInterval(this._timer);
+    this._ws?.close();
+  }
+}

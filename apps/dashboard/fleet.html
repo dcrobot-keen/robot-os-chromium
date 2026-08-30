@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>fleet dashboard</title>
+<style>
+  body { font-family: ui-monospace, monospace; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+  h1 { font-size: 16px; }
+  button { font-family: inherit; padding: 6px 14px; margin-right: 8px; }
+  label { display: inline-block; }
+  input[type="text"] { font-family: inherit; width: 260px; }
+  .row { margin: 12px 0; }
+  table { border-collapse: collapse; font-size: 12px; width: 100%; }
+  td, th { border: 1px solid #ccc; padding: 4px 8px; text-align: left; }
+  .online { color: #2a7d2a; font-weight: bold; }
+  .offline { color: #a33; }
+  #empty { color: #666; }
+  #log { background: #111; color: #ddd; padding: 10px; height: 140px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>fleet dashboard — Phase 6</h1>
+  <p>
+    signaling-server의 로봇 레지스트리(<code>list</code>)를 폴링해서 등록된 로봇을 전부 보여준다.
+    새 로봇이 매니페스트만 다르게 <code>host</code>로 등록하면, 이 페이지 코드를 전혀 건드리지
+    않아도 다음 폴링에 자동으로 나타난다. 이 페이지는 <code>host</code>도 <code>operator</code>도
+    아니라 순수 모니터라 하드웨어/시뮬레이터 연결과는 무관하다 — 실제 조작은 로봇 행의
+    "operator 열기"로 <a href="index.html">index.html</a>을 새 창으로 연다.
+  </p>
+
+  <div class="row">
+    <label>signaling <input id="sigUrl" type="text" value="ws://127.0.0.1:9770" /></label>
+    <button id="connectBtn">Connect</button>
+    <span id="status">stopped</span>
+  </div>
+
+  <div class="row">
+    <table id="robots">
+      <thead><tr><th>robot</th><th>status</th><th>operators</th><th>manifest</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <p id="empty" hidden>등록된 로봇이 없습니다 — host.html에서 로봇을 등록하면 여기 나타납니다.</p>
+  </div>
+
+  <div class="row"><div id="log"></div></div>
+
+  <script type="module">
+    import { FleetMonitor } from '../../packages/rtc/src/index.js';
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const connectBtn = document.getElementById('connectBtn');
+    const robotsBody = document.querySelector('#robots tbody');
+    const emptyEl = document.getElementById('empty');
+
+    function log(msg) {
+      const line = `[${new Date().toISOString()}] ${msg}`;
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(line);
+    }
+
+    // robot id -> <tr> (재사용해서 매 폴링마다 테이블을 통째로 새로 안 그림 --
+    // 사라진 로봇의 행만 지운다)
+    const rows = new Map();
+
+    function render(robots) {
+      const seen = new Set();
+      for (const r of robots) {
+        seen.add(r.robot);
+        let tr = rows.get(r.robot);
+        if (!tr) {
+          tr = document.createElement('tr');
+          rows.set(r.robot, tr);
+          robotsBody.appendChild(tr);
+        }
+        const manifestLabel = r.manifest
+          ? `${r.manifest.robot ?? r.robot} · ${r.manifest.transport?.kind ?? '?'}`
+          : '(없음)';
+        tr.innerHTML = `
+          <td>${r.robot}</td>
+          <td class="${r.online ? 'online' : 'offline'}">${r.online ? 'online' : 'offline'}</td>
+          <td>${r.operators}</td>
+          <td>${manifestLabel}</td>
+          <td><a href="index.html" target="_blank" rel="noopener">operator 열기</a></td>
+        `;
+      }
+      // 이번 응답에 없는 로봇(연결 끊겨 방 자체가 사라짐)은 행도 지운다.
+      for (const [robot, tr] of rows) {
+        if (!seen.has(robot)) {
+          tr.remove();
+          rows.delete(robot);
+        }
+      }
+      emptyEl.hidden = robots.length > 0;
+    }
+
+    let monitor = null;
+
+    connectBtn.addEventListener('click', () => {
+      if (monitor) return log('already connected');
+      connectBtn.disabled = true;
+
+      const url = document.getElementById('sigUrl').value.trim();
+      monitor = new FleetMonitor(url, { intervalMs: 2000 });
+      monitor.onUpdate((robots) => {
+        statusEl.textContent = `connected — ${robots.length}대 등록됨`;
+        render(robots);
+      });
+      monitor.onClose(() => {
+        statusEl.textContent = 'disconnected';
+        connectBtn.disabled = false;
+        monitor = null;
+        log('signaling connection closed');
+      });
+      monitor.connect();
+      log(`connecting to ${url}...`);
+    });
+  </script>
+</body>
+</html>

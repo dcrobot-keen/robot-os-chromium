@@ -8,6 +8,6 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "node scripts/roboteq-smoke.mjs && node scripts/signaling-smoke.mjs && node scripts/planner-wasm-smoke.mjs && node scripts/path-follower-smoke.mjs && node scripts/odometry-fusion-smoke.mjs && node scripts/map-node-smoke.mjs && node scripts/dynamixel-smoke.mjs && node scripts/lidar-lds-smoke.mjs"
+    "test": "node scripts/roboteq-smoke.mjs && node scripts/signaling-smoke.mjs && node scripts/planner-wasm-smoke.mjs && node scripts/path-follower-smoke.mjs && node scripts/odometry-fusion-smoke.mjs && node scripts/map-node-smoke.mjs && node scripts/dynamixel-smoke.mjs && node scripts/lidar-lds-smoke.mjs && node scripts/fleet-monitor-smoke.mjs"
   }
 }
