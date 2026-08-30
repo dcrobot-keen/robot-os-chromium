@@ -160,6 +160,14 @@ roadmap.md Phase 9 step 5. `scan-matcher.js`를 매 스캔 돌려 정적 맵(iPh
 
 박스 방 + 참 궤적 + 6% 슬립 & yaw 바이어스로 드리프트하는 오도메트리 스트림. `LocalizationNode`가 스캔 매칭 correction으로 추정치를 참값에 고정하는지 — **correction 오차 3.1cm vs raw 오도메트리 오차 94.6cm** (30배). 오도메트리 carry-forward, `setPose`, lost/relocalize(노이즈 스캔 → lost → 실제 스캔 → relocalized 1.00) 검증(8개 체크).
 
+## packages/nodes/src/costmap-node.js
+
+roadmap.md Phase 9 step 6. Nav2 `costmap_2d`의 아이디어(StaticLayer + ObstacleLayer)를 최소로 옮긴 것. `mapTopic`(MapNode의 라이브 `prob` 그리드)을 구독해서, 절대 삭지 않는 **정적 벽 레이어**(`staticOccupied` — 보통 `wallMaskFromSlicemap(slice)`)와 OR 병합 → `inflateOccupancy` → `costmapTopic`에 `{occupied, occupiedInflated, staticCount, dynamicCount}` 발행. 이유: MapNode를 iPhone 슬라이스 prior로 시딩하면 옮긴 가구·새 장애물은 Bayes로 자가 치유되지만(좋음), localization이 흔들려 몇 빔이 벽을 "관통"하면 벽 prior도 삭아 플래너가 벽을 통과하는 경로를 낼 수 있음(나쁨). 정적 레이어를 고정해 두면 벽은 항상 solid, 동적인 것만 라이브 레이어를 타고 여전히 치유됨. `poseTopic`을 주면 로봇 셀을 `occupiedInflated`에서 강제로 비움(`clearDisc`). 그리드 불일치는 `_onMap`에서 throw. `setStatic()`으로 맵 교체.
+
+## scripts/costmap-node-smoke.mjs
+
+4×4m 박스 + 둘레 벽만 정적 레이어. MapNode를 슬라이스 prior((2,2) 가구, (0.55,2) 벽)로 시딩하고 검증(10개 체크): 둘레 벽 점유; 가구 blob이 라이브 prob로 점유; 옮긴 의자가 free 스윕에 치유되어 costmap에서 사라짐; **정적 벽 셀은 MapNode가 자기 신념을 삭혀도 계속 점유**(핵심 안전 속성); 새로 본 장애물 추가; 그리드 불일치 throw; costmap이 planner-wasm으로 경로를 냄.
+
 ## scripts/planner-wasm-smoke.mjs
 
 `planner-wasm` + `PlannerNode`를 브라우저 없이 검증하는 스모크 테스트. pathfinder의 Go 테스트가 이미 다루는 시나리오(열린 공간, 벽 우회, Hybrid A*, 완전히 막힌 목적지)를 WASM 경유로 재확인하고, `grid.NewGridFromOccupancy`(원시 점유 비트맵) 경로가 동등한 폴리곤 기반 경로와 같은 결과를 내는지, 그리고 `PlannerNode`를 통한 `LocalBus` 요청/응답 왕복까지 확인한다(6개 체크). `node scripts/planner-wasm-smoke.mjs`. 2026-08-29에 이 스모크 테스트와 별개로, 실제 Chromium(Node/V8이 아니라)에서 `findPath`를 직접 호출해 동일한 결과(거리 9.806, 경로점 41개)가 나오는 것도 수동으로 확인했다.
@@ -265,7 +273,7 @@ roadmap.md Phase 7·8의 통과 페이지 — 시뮬레이터 상대로 **브라
 - **[Start mapping]** — `MapNode`(격자 `gridConfigFromBounds([-1,-1]..[16,12], 0.05m)`, 인플레이션 0.18m) + `PlannerNode`(WASM 로드) + `PathFollowerNode` 생성, 그리고 센서 WS 오픈. 센서 프레임마다: `scan`을 `sim/scan`에 발행, 1.5초마다 ground truth + 가우시안 노이즈를 `sim/correction`에 발행(VPS 대역). 첫 correction 전엔 `scan`을 안 흘려서 MapNode가 (0,0) 콜드스타트 pose에서 래스터화하는 걸 막는다.
 - **캔버스 클릭** — 클릭 좌표를 월드 좌표로 변환 → `mapNode.snapshot()`의 `occupiedInflated`(팽창본)를 `occupied`로, 현재 fused pose를 start로, 클릭점을 goal로 해서 `sim/plan-request` 발행. `PlannerNode` 응답(`sim/plan-result`)이 오면 경로를 `sim/path`에 발행 → `PathFollowerNode`가 pure pursuit로 `sim/drive/cmd_vel` 발행 → 버스 구독이 `drive.setVelocity()` 호출 → 시뮬레이터 주행.
 - **[Save map]/[Load map]** — `mapNode.serialize()` ↔ `localStorage["mapnode:nav"]`. Phase 8의 저장/로드.
-- **[iPhone map] 파일 + [Set pose] (Phase 9)** — slicemap-v1 JSON 파일을 고르면 `parseSlicemap` → origin을 (0,0)으로 정규화(slicemap-to-world.mjs 규약, sim world와 프레임 일치) → `buildLikelihoodField`(벽 마스크, σ 0.12) → `setViewGrid(슬라이스 격자)`로 렌더/클릭 프레임 전환. [Start mapping] 때 슬라이스가 있으면 MapNode 격자를 슬라이스 격자로, `mapNode.load(슬라이스)`로 log-odds prior 시딩, `LocalizationNode` 생성. 슬라이스 로드 시 센서 핸들러가 ground-truth VPS 대역을 끄고 LocalizationNode가 스캔 매칭으로 `sim/correction`을 몬다. [Set pose] → 다음 캔버스 클릭이 `locNode.setPose()` (초기 pose, "2D Pose Estimate"). **실제 Chrome 확인**: bedroom.slicemap.json 로드 → set-pose → `kLoc` "match · score 0.94~0.96", fused pose가 참 spawn에 ~2cm로 고정. (장시간 주행 시 nav.html 전체 부하로 렌더가 느려지는 이슈는 프로파일 대상 — step 6.)
+- **[iPhone map] 파일 + [Set pose] (Phase 9)** — slicemap-v1 JSON 파일을 고르면 `parseSlicemap` → origin을 (0,0)으로 정규화(slicemap-to-world.mjs 규약, sim world와 프레임 일치) → `buildLikelihoodField`(벽 마스크, σ 0.12) → `setViewGrid(슬라이스 격자)`로 렌더/클릭 프레임 전환. [Start mapping] 때 슬라이스가 있으면 MapNode 격자를 슬라이스 격자로, `mapNode.load(슬라이스)`로 log-odds prior 시딩, `LocalizationNode` + `CostmapNode`(정적 레이어 = `wallMaskFromSlicemap`) 생성. 슬라이스 로드 시 센서 핸들러가 ground-truth VPS 대역을 끄고 LocalizationNode가 스캔 매칭으로 `sim/correction`을 몬다. 목표 클릭 시 플래너는 `costmapLatest ?? mapNode.snapshot()` 위에서 경로를 낸다. [Set pose] → 다음 캔버스 클릭이 `locNode.setPose()` (초기 pose, "2D Pose Estimate"). **실제 Chrome 확인**: bedroom.slicemap.json 로드 → set-pose → `kLoc` "match · score 0.94~0.96", fused pose가 참 spawn에 ~2cm로 고정. bedroom sim에서 0.5/0.5로 주행: perf 워치독(프레임>60ms / 센서 핸들러>40ms를 5초마다 로깅)이 480 센서 프레임 동안 느린 프레임 0건, fused pose가 GT에 2~4cm 추적. 앞서 "주행해도 fused pose가 안 움직임"은 좁고 어수선한 침실에서 약한 0.35/0.42 명령에 로봇이 낀 것 — 오도메트리가 안 나가니 carry-forward가 옮길 게 없었던 것. 무거운 노드를 Worker로 옮길 필요는 없다고 판단.
 - rAF 루프가 캔버스에 그린다: 점유격자를 **확률 grayscale**로(`prob` 필드: p→0 흰색, p≈0.5 미관측 투명, p→1 검정 — `MapNode` 발행 때 오프스크린 `ImageData`로 래스터), 팽창 셀은 반투명 파랑 halo, fused pose(초록), odom 고스트(점선), 레이저 스캔점(빨강), 계획 경로(파랑), goal 마커.
 
 `@ros-chromium/planner-wasm`이 `planner-node.js`에서 bare specifier로 import되므로 — 브라우저엔 패키지 리졸버가 없다 — 페이지 `<head>`의 `<script type="importmap">`로 서빙 경로에 매핑한다. `serve-dashboard.mjs` MIME 맵에 `.wasm`도 추가했다.

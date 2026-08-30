@@ -7,3 +7,4 @@ export * from './map-node.js';
 export * from './slicemap-prior.js';
 export * from './scan-matcher.js';
 export * from './localization-node.js';
+export * from './costmap-node.js';

@@ -74,7 +74,7 @@
     import {
       OdometryNode, PoseFusionNode, MapNode, PlannerNode, PathFollowerNode,
       gridConfigFromBounds,
-      LocalizationNode, buildLikelihoodField, parseSlicemap, slicemapGrid, wallMaskFromSlicemap,
+      LocalizationNode, CostmapNode, buildLikelihoodField, parseSlicemap, slicemapGrid, wallMaskFromSlicemap,
     } from '../../packages/nodes/src/index.js';
 
     const ROBOTEQ_URL = 'ws://127.0.0.1:8765';
@@ -83,7 +83,8 @@
     const R = 'sim';
     const T = {
       odom: `${R}/odom`, corr: `${R}/correction`, pose: `${R}/pose`, scan: `${R}/scan`,
-      map: `${R}/map`, planReq: `${R}/plan-request`, planRes: `${R}/plan-result`,
+      map: `${R}/map`, costmap: `${R}/costmap`,
+      planReq: `${R}/plan-request`, planRes: `${R}/plan-result`,
       path: `${R}/path`, cmd: `${R}/drive/cmd_vel`,
     };
     const GRID = gridConfigFromBounds({ minX: -1, minY: -1, maxX: 16, maxY: 12 }, 0.05);
@@ -179,7 +180,20 @@
       ctx.restore();
     }
 
+    // --- perf watchdog: log if a frame or the sensor handler runs long ---
+    let perfFrames = 0, perfSlow = 0, perfLastReport = 0;
+    function perfTick(dt) {
+      perfFrames++;
+      if (dt > 60) perfSlow++;
+      const now = performance.now();
+      if (now - perfLastReport > 5000) {
+        if (perfSlow > 0) log(`perf: ${perfSlow}/${perfFrames} frames >60ms in the last 5s`);
+        perfFrames = perfSlow = 0; perfLastReport = now;
+      }
+    }
+
     function draw() {
+      const _t0 = performance.now();
       try {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.strokeStyle = '#ddd'; ctx.setLineDash([]);
@@ -217,6 +231,7 @@
       } catch (err) {
         if (!drawErrLogged) { drawErrLogged = true; log(`draw() error: ${err.message}`); }
       }
+      perfTick(performance.now() - _t0);
       requestAnimationFrame(draw);
     }
     requestAnimationFrame(draw);
@@ -225,6 +240,7 @@
     let odomNode = null, fusionNode = null, mapNode = null, plannerNode = null, followerNode = null;
     let reqSeq = 0, lastReqId = null, lastCorrectionAt = 0, poseReady = false, mapping = false;
     let loadedSlice = null, loadedField = null, locNode = null, setPoseArmed = false;
+    let costmapNode = null, costmapLatest = null;
 
     $('connectBtn').addEventListener('click', async () => {
       if (transport) return;
@@ -319,6 +335,17 @@
         });
         $('setPoseBtn').disabled = false;
         log(`    set an initial pose: "Set pose (click)" then click the robot's spot`);
+
+        // CostmapNode: hard static walls (from the slice) OR MapNode's live
+        // map -> the grid the planner uses. Walls never erode; moved
+        // furniture / new obstacles ride the live layer.
+        costmapNode = new CostmapNode(bus, {
+          mapTopic: T.map, costmapTopic: T.costmap, poseTopic: T.pose,
+          staticOccupied: wallMaskFromSlicemap(loadedSlice),
+          grid: mapGrid, inflationRadius: INFLATION_M, dynThreshold: 0.6,
+          onUpdate: (cm) => { costmapLatest = cm; },
+        });
+        log(`[m2c] CostmapNode (static walls + live obstacles)`);
       }
 
       log(`[m3] sensor stream ${SENSOR_URL}`);
@@ -327,7 +354,9 @@
       sensorWs.addEventListener('open', () => log(`    sensor connected`));
       sensorWs.addEventListener('error', () => log(`    sensor ws error`));
       let frameCount = 0;
+      let sensorSlow = 0, sensorReport = 0;
       sensorWs.addEventListener('message', (ev) => {
+        const _st = performance.now();
         try {
           const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data));
           if (msg.type !== 'frame') return;
@@ -357,6 +386,12 @@
           }
         } catch (err) {
           log(`sensor handler error: ${err.message}`);
+        }
+        const dt = performance.now() - _st;
+        if (dt > 40) sensorSlow++;
+        if (performance.now() - sensorReport > 5000) {
+          if (sensorSlow > 0) log(`perf: sensor handler >40ms on ${sensorSlow} frames in the last 5s`);
+          sensorSlow = 0; sensorReport = performance.now();
         }
       });
     });
@@ -428,7 +463,9 @@
 
       if (!mapNode || !fusedPose) return log('need Start mapping + a pose first');
       goal = g;
-      const map = mapNode.snapshot();
+      // plan on the costmap (static walls + live obstacles) when we have one,
+      // else MapNode's own inflated grid.
+      const map = costmapLatest ?? mapNode.snapshot();
       lastReqId = `req-${++reqSeq}`;
       bus.publish(T.planReq, {
         requestId: lastReqId,
