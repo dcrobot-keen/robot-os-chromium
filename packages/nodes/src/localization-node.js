@@ -60,6 +60,7 @@ export class LocalizationNode {
     initialPose = null, matchOpts = {},
     minScore = 0.35, relocalizeMinScore = 0.6, lostAfter = 5,
     relocalizeWindowM = 0.8, relocalizeWindowRad = Math.PI / 3,
+    relocalizeCoarseM = 0.1, relocalizeCoarseRad = 0.07, relocalizeEveryN = 4,
     onEvent,
   } = {}) {
     if (!scanTopic || !odomTopic || !correctionTopic || !likelihoodField) {
@@ -72,7 +73,11 @@ export class LocalizationNode {
     this._minScore = minScore;
     this._relocalizeMinScore = relocalizeMinScore;
     this._lostAfter = lostAfter;
-    this._reloc = { windowM: relocalizeWindowM, windowRad: relocalizeWindowRad };
+    this._reloc = {
+      windowM: relocalizeWindowM, windowRad: relocalizeWindowRad,
+      coarseM: relocalizeCoarseM, coarseRad: relocalizeCoarseRad, everyN: Math.max(1, relocalizeEveryN),
+    };
+    this._relocTick = 0;
     this._onEvent = onEvent;
 
     this._mapPose = initialPose ? { ...initialPose } : null;
@@ -111,9 +116,17 @@ export class LocalizationNode {
   _onScan(scan) {
     if (!this._mapPose || !scan || !Array.isArray(scan.ranges)) return;
 
-    const opts = this._lost
-      ? { ...this._matchOpts, windowM: this._reloc.windowM, windowRad: this._reloc.windowRad }
-      : this._matchOpts;
+    let opts = this._matchOpts;
+    if (this._lost) {
+      // the widened search is much heavier -- only run it every Nth scan so
+      // it can't peg the thread while lost. In between, keep coasting on odom.
+      if (this._relocTick++ % this._reloc.everyN !== 0) { this._emit('weak', this._lastScore, this._mapPose); return; }
+      opts = {
+        ...this._matchOpts,
+        windowM: this._reloc.windowM, windowRad: this._reloc.windowRad,
+        coarseM: this._reloc.coarseM, coarseRad: this._reloc.coarseRad,
+      };
+    }
     const { pose, score, evals } = matchScan(this._lf, this._mapPose, scan, opts);
     this._lastScore = score;
 
@@ -124,6 +137,7 @@ export class LocalizationNode {
       this._odomAtCarry = this._lastOdom ? { ...this._lastOdom } : this._odomAtCarry;
       this._lowStreak = 0;
       this._lost = false;
+      this._relocTick = 0;
       this._bus.publish(this._correctionTopic, { x: pose.x, y: pose.y, theta: pose.theta });
       this._emit(wasLost ? 'relocalized' : 'match', score, pose, evals);
     } else {

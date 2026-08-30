@@ -38,6 +38,8 @@
       <button id="resetMapBtn" disabled>Reset map</button>
       <button id="saveMapBtn" disabled>Save map</button>
       <button id="loadMapBtn" disabled>Load map</button>
+      <label>iPhone map: <input type="file" id="sliceFile" accept=".json" /></label>
+      <button id="setPoseBtn" disabled>Set pose (click)</button>
       <label><input type="checkbox" id="showOdom" checked /> odom ghost</label>
       <label><input type="checkbox" id="showScan" checked /> laser</label>
       <span class="legend">
@@ -57,6 +59,7 @@
       <div class="kv"><b>fused pose</b><span id="kPose">–</span></div>
       <div class="kv"><b>odom pose</b><span id="kOdom">–</span></div>
       <div class="kv"><b>drift (gt−odom)</b><span id="kDrift">–</span></div>
+      <div class="kv"><b>localization</b><span id="kLoc">–</span></div>
       <div class="kv"><b>map cells</b><span id="kMap">–</span></div>
       <div class="kv"><b>last plan</b><span id="kPlan">–</span></div>
       <div class="kv"><b>cmd_vel</b><span id="kCmd">–</span></div>
@@ -71,6 +74,7 @@
     import {
       OdometryNode, PoseFusionNode, MapNode, PlannerNode, PathFollowerNode,
       gridConfigFromBounds,
+      LocalizationNode, buildLikelihoodField, parseSlicemap, slicemapGrid, wallMaskFromSlicemap,
     } from '../../packages/nodes/src/index.js';
 
     const ROBOTEQ_URL = 'ws://127.0.0.1:8765';
@@ -100,16 +104,23 @@
     window.addEventListener('error', (e) => log(`window error: ${e.message} @ ${e.filename}:${e.lineno}`));
     window.addEventListener('unhandledrejection', (e) => log(`unhandled rejection: ${e.reason?.message || e.reason}`));
 
-    const gridW = GRID.cols * GRID.cellSize, gridH = GRID.rows * GRID.cellSize;
+    // The view fits `viewGrid` (GRID by default; the loaded slicemap's grid
+    // once an iPhone map is loaded). setViewGrid() recomputes the transform.
+    let viewGrid = GRID, gridW, gridH, scale, offX, offY;
     const PAD = 16;
-    const scale = Math.min((canvas.width - 2 * PAD) / gridW, (canvas.height - 2 * PAD) / gridH);
-    const offX = PAD + (canvas.width - 2 * PAD - gridW * scale) / 2;
-    const offY = PAD + (canvas.height - 2 * PAD - gridH * scale) / 2;
-    const sx = (wx) => offX + (wx - GRID.originX) * scale;
-    const sy = (wy) => canvas.height - offY - (wy - GRID.originY) * scale;
+    function setViewGrid(g) {
+      viewGrid = g;
+      gridW = g.cols * g.cellSize; gridH = g.rows * g.cellSize;
+      scale = Math.min((canvas.width - 2 * PAD) / gridW, (canvas.height - 2 * PAD) / gridH);
+      offX = PAD + (canvas.width - 2 * PAD - gridW * scale) / 2;
+      offY = PAD + (canvas.height - 2 * PAD - gridH * scale) / 2;
+    }
+    setViewGrid(GRID);
+    const sx = (wx) => offX + (wx - viewGrid.originX) * scale;
+    const sy = (wy) => canvas.height - offY - (wy - viewGrid.originY) * scale;
     const toWorld = (cx, cy) => ({
-      x: (cx - offX) / scale + GRID.originX,
-      y: (canvas.height - offY - cy) / scale + GRID.originY,
+      x: (cx - offX) / scale + viewGrid.originX,
+      y: (canvas.height - offY - cy) / scale + viewGrid.originY,
     });
     const gaussian = (s) => {
       let u = 0, v = 0;
@@ -172,10 +183,10 @@
       try {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.strokeStyle = '#ddd'; ctx.setLineDash([]);
-        ctx.strokeRect(sx(GRID.originX), sy(GRID.originY + gridH), gridW * scale, gridH * scale);
+        ctx.strokeRect(sx(viewGrid.originX), sy(viewGrid.originY + gridH), gridW * scale, gridH * scale);
         if (mapBitmap) {
           ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(mapBitmap, sx(GRID.originX), sy(GRID.originY + gridH), gridW * scale, gridH * scale);
+          ctx.drawImage(mapBitmap, sx(viewGrid.originX), sy(viewGrid.originY + gridH), gridW * scale, gridH * scale);
         }
         if ($('showScan').checked && latestScan && fusedPose) {
           ctx.fillStyle = '#e5484d';
@@ -213,6 +224,7 @@
     let transport = null, bus = null, sensorWs = null, heartbeat = null, drive = null, manifest = null;
     let odomNode = null, fusionNode = null, mapNode = null, plannerNode = null, followerNode = null;
     let reqSeq = 0, lastReqId = null, lastCorrectionAt = 0, poseReady = false, mapping = false;
+    let loadedSlice = null, loadedField = null, locNode = null, setPoseArmed = false;
 
     $('connectBtn').addEventListener('click', async () => {
       if (transport) return;
@@ -267,11 +279,15 @@
       for (const b of ['resetMapBtn', 'saveMapBtn', 'loadMapBtn']) $(b).disabled = false;
       const geometry = manifest.drive.geometry;
 
-      log(`[m1] MapNode (grid ${GRID.cols}x${GRID.rows} @ ${GRID.cellSize}m)`);
+      // If an iPhone-scan slicemap was loaded, its frame is the map frame and
+      // it seeds the log-odds prior; otherwise MapNode builds from scratch.
+      const mapGrid = loadedSlice ? slicemapGrid(loadedSlice) : GRID;
+      log(`[m1] MapNode (grid ${mapGrid.cols}x${mapGrid.rows} @ ${mapGrid.cellSize}m${loadedSlice ? ', iPhone prior' : ''})`);
       mapNode = new MapNode(bus, {
         scanTopic: T.scan, poseTopic: T.pose, mapTopic: T.map,
-        grid: GRID, inflationRadius: INFLATION_M, publishHz: 1,
+        grid: mapGrid, inflationRadius: INFLATION_M, publishHz: 1,
       });
+      if (loadedSlice) mapNode.load(loadedSlice);
       bus.subscribe(T.map, (m) => {
         rasterizeMap(m);
         $('kMap').textContent = `${mapCounts.occ} wall / ${mapCounts.inf} inflated of ${m.cols}x${m.rows}`;
@@ -291,6 +307,20 @@
         log(`plan ok: ${p.length} pts, ${distance.toFixed(2)} m`);
       });
 
+      if (loadedField) {
+        log(`[m2b] LocalizationNode (scan-match vs the iPhone map -> correction)`);
+        locNode = new LocalizationNode(bus, {
+          scanTopic: T.scan, odomTopic: T.odom, correctionTopic: T.corr,
+          likelihoodField: loadedField, minScore: 0.25, lostAfter: 8,
+          onEvent: (e) => {
+            $('kLoc').textContent = `${e.type} · score ${e.score.toFixed(2)}${e.lost ? ' · LOST' : ''}`;
+            if (e.type === 'lost' || e.type === 'relocalized') log(`localization: ${e.type} (${e.score.toFixed(2)})`);
+          },
+        });
+        $('setPoseBtn').disabled = false;
+        log(`    set an initial pose: "Set pose (click)" then click the robot's spot`);
+      }
+
       log(`[m3] sensor stream ${SENSOR_URL}`);
       sensorWs = new WebSocket(SENSOR_URL);
       sensorWs.binaryType = 'arraybuffer';
@@ -306,15 +336,21 @@
           if (++frameCount % 30 === 0) log(`    ${frameCount} sensor frames`);
 
           const now = Date.now();
-          if (now - lastCorrectionAt >= CORRECTION_MS) {
+          // LocalizationNode drives `correction` from scan matching when the
+          // iPhone map is loaded; otherwise fall back to the throttled+noisy
+          // ground-truth stand-in for a VPS fix.
+          if (!locNode && now - lastCorrectionAt >= CORRECTION_MS) {
             lastCorrectionAt = now;
             bus.publish(T.corr, {
               x: groundTruth.x + gaussian(SIG_M),
               y: groundTruth.y + gaussian(SIG_M),
               theta: groundTruth.theta + gaussian(SIG_RAD),
             });
-            if (!poseReady) { poseReady = true; log('    pose seeded — mapping enabled'); }
           }
+          // hold scans until we have a pose to fold them at: a correction has
+          // landed (VPS stand-in) or the user set an initial pose (localization).
+          const havePose = locNode ? !!locNode.getPose() : (Date.now() - lastCorrectionAt < CORRECTION_MS * 2);
+          if (havePose && !poseReady) { poseReady = true; log('    scans flowing'); }
           if (poseReady) bus.publish(T.scan, latestScan);
           if (groundTruth && odomPose) {
             $('kDrift').textContent = `${Math.hypot(groundTruth.x - odomPose.x, groundTruth.y - odomPose.y).toFixed(3)} m`;
@@ -353,11 +389,44 @@
       } catch (e) { log(`load failed: ${e.message}`); }
     });
 
+    // iPhone map (slicemap-v1) file -> likelihood field + (if mapping) prior + LocalizationNode
+    $('sliceFile').addEventListener('change', async (ev) => {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      try {
+        const parsed = parseSlicemap(JSON.parse(await file.text()));
+        // work in slice-local coords (origin 0,0) -- the convention
+        // slicemap-to-world.mjs uses, so the sim world, the field, the
+        // render and the initial-pose click all share one frame.
+        loadedSlice = { ...parsed, origin: [0, 0] };
+        const g = slicemapGrid(loadedSlice);
+        loadedField = buildLikelihoodField(g, wallMaskFromSlicemap(loadedSlice), { sigmaM: 0.12 });
+        setViewGrid(g);
+        mapBitmap = null;
+        log(`iPhone map "${file.name}": ${g.cols}x${g.rows} @ ${g.cellSize}m, z=${loadedSlice.z}. ` +
+            (mapping ? 'restart mapping to use it.' : 'now press "Start mapping".'));
+      } catch (e) { log(`slicemap load failed: ${e.message}`); loadedSlice = loadedField = null; }
+    });
+
+    $('setPoseBtn').addEventListener('click', () => {
+      setPoseArmed = true;
+      log('set-pose armed — click the robot\'s spot on the map (heading = current estimate)');
+    });
+
     canvas.addEventListener('click', (ev) => {
-      if (!mapNode || !fusedPose) return log('need Start mapping + a pose first');
       const rect = canvas.getBoundingClientRect();
       const g = toWorld((ev.clientX - rect.left) * (canvas.width / rect.width),
                         (ev.clientY - rect.top) * (canvas.height / rect.height));
+
+      if (setPoseArmed && locNode) {
+        setPoseArmed = false;
+        locNode.setPose({ x: g.x, y: g.y, theta: fusedPose?.theta ?? 0 });
+        fusedPose = { x: g.x, y: g.y, theta: fusedPose?.theta ?? 0 };
+        log(`initial pose set to (${g.x.toFixed(2)}, ${g.y.toFixed(2)})`);
+        return;
+      }
+
+      if (!mapNode || !fusedPose) return log('need Start mapping + a pose first');
       goal = g;
       const map = mapNode.snapshot();
       lastReqId = `req-${++reqSeq}`;

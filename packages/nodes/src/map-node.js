@@ -21,7 +21,7 @@
 // `serialize()` and `load()` let a map be cleared / saved / reloaded --
 // load() also accepts a slicemap-v1 (iPhone-scan prior, Phase 9).
 
-import { parseSlicemap, slicemapGrid, slicemapToLogOdds } from './slicemap-prior.js';
+import { parseSlicemap, slicemapGrid, slicemapToLogOdds, isParsedSlice } from './slicemap-prior.js';
 //
 // The published message keeps the Phase-7 shape so PlannerNode and the
 // dashboard are unchanged:
@@ -384,7 +384,7 @@ export class MapNode {
    * The grid config must match this node's. Returns this.
    */
   load(obj, priorOpts) {
-    if (obj && obj.format === 'slicemap-v1') {
+    if (obj && (obj.format === 'slicemap-v1' || isParsedSlice(obj))) {
       const slice = parseSlicemap(obj);
       this._assertGridMatches(slicemapGrid(slice), 'slicemap');
       this._logOdds.set(slicemapToLogOdds(slice, priorOpts));

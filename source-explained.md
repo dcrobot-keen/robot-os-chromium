@@ -152,7 +152,7 @@ roadmap.md Phase 9 step 5. `scan-matcher.js`를 매 스캔 돌려 정적 맵(iPh
 
 - 스캔 사이엔 오도메트리 델타로 추정치를 carry-forward(`applyOdomDelta` — `map→odom` 변환은 고정, pose가 odom 따라 이동). `_onOdom`이 `_mapPose`를 갱신.
 - `_onScan`: `matchScan(field, _mapPose(prior), scan)`. `score ≥ minScore`(추적 기본 0.35)면 `_mapPose = 결과`, correction 발행. 아니면 `_lowStreak++`, `lostAfter`(기본 5) 연속이면 `_lost` → **발행 중단**(PoseFusion이 오도메트리로 coasting) + 탐색창 확대(`relocalizeWindowM/Rad`).
-- 재획득 문턱 `relocalizeMinScore`(기본 0.6 — 확대 탐색은 스퍼리어스 고득점을 더 잘 찾아서 추적 문턱보다 엄격).
+- 재획득 문턱 `relocalizeMinScore`(기본 0.6 — 확대 탐색은 스퍼리어스 고득점을 더 잘 찾아서 추적 문턱보다 엄격). 확대 탐색은 무거워서 `relocalizeEveryN`(기본 4) 스캔마다만 시도(그 사이엔 오도메트리 coasting) + 더 성긴 coarse 스텝(`relocalizeCoarseM/Rad`) — lost 동안 메인 스레드 안 먹게.
 - `setPose({x,y,theta})` — "2D Pose Estimate" 훅(맵 클릭). `getPose()`.
 - `onEvent({type:'match'|'weak'|'lost'|'relocalized'|'set-pose', score, pose})`.
 
@@ -265,6 +265,7 @@ roadmap.md Phase 7·8의 통과 페이지 — 시뮬레이터 상대로 **브라
 - **[Start mapping]** — `MapNode`(격자 `gridConfigFromBounds([-1,-1]..[16,12], 0.05m)`, 인플레이션 0.18m) + `PlannerNode`(WASM 로드) + `PathFollowerNode` 생성, 그리고 센서 WS 오픈. 센서 프레임마다: `scan`을 `sim/scan`에 발행, 1.5초마다 ground truth + 가우시안 노이즈를 `sim/correction`에 발행(VPS 대역). 첫 correction 전엔 `scan`을 안 흘려서 MapNode가 (0,0) 콜드스타트 pose에서 래스터화하는 걸 막는다.
 - **캔버스 클릭** — 클릭 좌표를 월드 좌표로 변환 → `mapNode.snapshot()`의 `occupiedInflated`(팽창본)를 `occupied`로, 현재 fused pose를 start로, 클릭점을 goal로 해서 `sim/plan-request` 발행. `PlannerNode` 응답(`sim/plan-result`)이 오면 경로를 `sim/path`에 발행 → `PathFollowerNode`가 pure pursuit로 `sim/drive/cmd_vel` 발행 → 버스 구독이 `drive.setVelocity()` 호출 → 시뮬레이터 주행.
 - **[Save map]/[Load map]** — `mapNode.serialize()` ↔ `localStorage["mapnode:nav"]`. Phase 8의 저장/로드.
+- **[iPhone map] 파일 + [Set pose] (Phase 9)** — slicemap-v1 JSON 파일을 고르면 `parseSlicemap` → origin을 (0,0)으로 정규화(slicemap-to-world.mjs 규약, sim world와 프레임 일치) → `buildLikelihoodField`(벽 마스크, σ 0.12) → `setViewGrid(슬라이스 격자)`로 렌더/클릭 프레임 전환. [Start mapping] 때 슬라이스가 있으면 MapNode 격자를 슬라이스 격자로, `mapNode.load(슬라이스)`로 log-odds prior 시딩, `LocalizationNode` 생성. 슬라이스 로드 시 센서 핸들러가 ground-truth VPS 대역을 끄고 LocalizationNode가 스캔 매칭으로 `sim/correction`을 몬다. [Set pose] → 다음 캔버스 클릭이 `locNode.setPose()` (초기 pose, "2D Pose Estimate"). **실제 Chrome 확인**: bedroom.slicemap.json 로드 → set-pose → `kLoc` "match · score 0.94~0.96", fused pose가 참 spawn에 ~2cm로 고정. (장시간 주행 시 nav.html 전체 부하로 렌더가 느려지는 이슈는 프로파일 대상 — step 6.)
 - rAF 루프가 캔버스에 그린다: 점유격자를 **확률 grayscale**로(`prob` 필드: p→0 흰색, p≈0.5 미관측 투명, p→1 검정 — `MapNode` 발행 때 오프스크린 `ImageData`로 래스터), 팽창 셀은 반투명 파랑 halo, fused pose(초록), odom 고스트(점선), 레이저 스캔점(빨강), 계획 경로(파랑), goal 마커.
 
 `@ros-chromium/planner-wasm`이 `planner-node.js`에서 bare specifier로 import되므로 — 브라우저엔 패키지 리졸버가 없다 — 페이지 `<head>`의 `<script type="importmap">`로 서빙 경로에 매핑한다. `serve-dashboard.mjs` MIME 맵에 `.wasm`도 추가했다.

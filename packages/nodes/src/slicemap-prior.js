@@ -25,12 +25,18 @@ const b64dec = typeof atob === 'function'
   ? (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0))
   : (s) => new Uint8Array(Buffer.from(s, 'base64'));
 
+/** True for the output of parseSlicemap (vs. the raw slicemap-v1 JSON). */
+export function isParsedSlice(obj) {
+  return !!(obj && obj.codes && obj.codes.length !== undefined && typeof obj.resolution === 'number' && obj.format === undefined);
+}
+
 /**
- * @param {object} obj - parsed slicemap-v1 JSON
+ * @param {object} obj - raw slicemap-v1 JSON, or an already-parsed slice (passed through)
  * @returns {{ z:number, band:number, resolution:number, origin:[number,number],
  *   cols:number, rows:number, codes:Uint8Array }}
  */
 export function parseSlicemap(obj) {
+  if (isParsedSlice(obj)) return obj;
   if (!obj || obj.format !== 'slicemap-v1') throw new Error('not a slicemap-v1 object');
   const codes = b64dec(obj.data);
   if (codes.length !== obj.cols * obj.rows) {

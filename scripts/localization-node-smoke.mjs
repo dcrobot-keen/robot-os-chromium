@@ -130,9 +130,11 @@ check('LocalizationNode: match events carry a healthy score', events.filter((e) 
   for (let i = 0; i < 4; i++) bus.publish('scan', { angleMin: 0, angleIncrement: Math.PI / 60, rangeMin: 0.12, rangeMax: 4, ranges: Array.from({ length: 120 }, noise) });
   check('LocalizationNode: a run of unmatchable scans -> "lost"', events.some((e) => e.type === 'lost'), events.map((e) => e.type).join(','));
   const nBefore = corrections.length;
-  bus.publish('scan', scanAt(truth)); // a good scan again
-  check('LocalizationNode: a good scan after lost -> "relocalized" + correction resumes',
-    events.some((e) => e.type === 'relocalized') && corrections.length === nBefore + 1,
+  // the widened relocalize search is throttled (every Nth scan), so send a
+  // few good scans -- one lands on the throttle window and re-acquires.
+  for (let i = 0; i < 5; i++) bus.publish('scan', scanAt(truth));
+  check('LocalizationNode: good scans after lost -> "relocalized" + correction resumes',
+    events.some((e) => e.type === 'relocalized') && corrections.length > nBefore,
     events.map((e) => `${e.type}:${e.score?.toFixed(2)}`).join(' '));
 }
 
