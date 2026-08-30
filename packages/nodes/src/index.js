@@ -5,3 +5,4 @@ export * from './odometry-node.js';
 export * from './pose-fusion-node.js';
 export * from './map-node.js';
 export * from './slicemap-prior.js';
+export * from './scan-matcher.js';

@@ -130,7 +130,21 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 ## scripts/map-node-smoke.mjs
 
-`MapNode`를 브라우저·시뮬레이터 없이 검증(34개 체크). 격자 기하 ↔ `grid.go`, `castRayCells` 완주, `probFromLogOdds`/`occupancyFromLogOdds`, **log-odds 관성**(20번 free 후 반사 1발에도 free 유지 / 20번 hit 후 통과 1발에도 wall 유지 — hit/miss였으면 뒤집힘), `serializeMap`/`deserializeMap` 왕복(int8 양자화 오차 이내), 팽창·`clearDisc` 단위 검증. 그다음 합성 360빔 방 스캔을 넣어 네 벽 occupied·실내 free·`prob` 그리드 발행을 확인하고, **발행 격자를 실제 `planner-wasm`에 넣어** 경로 왕복(팽창 벽 안쪽 목표는 거부), 마지막으로 `serialize → reset(벽 사라짐) → load(벽 복원)` + 격자 불일치 로드 거부.
+`MapNode`를 브라우저·시뮬레이터 없이 검증(43개 체크). 격자 기하 ↔ `grid.go`, `castRayCells` 완주, `probFromLogOdds`/`occupancyFromLogOdds`, **log-odds 관성**(20번 free 후 반사 1발에도 free 유지 / 20번 hit 후 통과 1발에도 wall 유지 — hit/miss였으면 뒤집힘), `serializeMap`/`deserializeMap` 왕복(int8 양자화 오차 이내), **slicemap-v1 prior**(`parseSlicemap`/`slicemapGrid`/`slicemapToLogOdds`, `MapNode.load(slicemap)` 시딩, 가구 prior 자가 치유 vs 벽 유지, 격자 불일치 거부), 팽창·`clearDisc` 단위 검증. 그다음 합성 360빔 방 스캔을 넣어 네 벽 occupied·실내 free·`prob` 그리드 발행을 확인하고, **발행 격자를 실제 `planner-wasm`에 넣어** 경로 왕복(팽창 벽 안쪽 목표는 거부), 마지막으로 `serialize → reset(벽 사라짐) → load(벽 복원)`.
+
+## packages/nodes/src/scan-matcher.js
+
+roadmap.md Phase 9 step 4 ("9a") — correlative scan matching. "맵 + 오도메트리"를 "맵 상대 localization"으로 바꾸는 코어. `LocalizationNode`(step 5)가 매 스캔 돌려 `PoseFusionNode`에 correction으로 먹인다(VPS 자리).
+
+- `buildLikelihoodField(grid, occupied, {sigmaM})` — 정적 점유 격자를 `L(x,y) = exp(−d²/2σ²)`로 블러(σ 기본 0.06m). d = 가장 가까운 점유 셀까지 거리. 구현은 점유 셀마다 사전계산 가우시안 커널(±3σ)을 max-합성 — 희소 맵에서 빠르고 커널 반경 밖은 0. **벽 셀만** 넣으면 스캔 후 움직인 가구가 추정을 안 흔듦.
+- `likelihoodFieldFromLogOdds(grid, logOdds, {wallLogOdds, sigmaM})` — MapNode 격자용 편의: `L ≥ wallLogOdds`(기본 1.2, slicemap 벽 prior 2.0과 가구 0.7 사이)만 점유로 → field.
+- `scanToPoints(scan, {beamStride})` — 빔 range → 로봇 프레임 끝점 `[x0,y0,x1,y1,...]`, 무효/무반사 빔 제외. 스캔당 1회 사전계산.
+- `scoreScan(lf, px, py, pth, pts)` — 그 pose에 스캔 끝점을 놓고 field 조회 평균(0..1).
+- `matchScan(lf, priorPose, scan, opts)` — coarse(±0.25m/±8°, 0.05m/2° 스텝) → best 주변 fine(0.01m/0.34°) grid search. 스모크: 합성 방 raycast 스캔을 18cm/8° 어긋난 prior에서 1.4~2.8cm / ~1°로 복구, 2662 eval / 1~3ms(랩탑). JS로 충분 — WASM 불필요(사용자 "벤치 먼저" 결정 해소).
+
+## scripts/scan-matcher-smoke.mjs
+
+박스 방 raycast로 합성 스캔 + likelihood field. `scoreScan`이 참 pose에서 높고 어긋난 pose에서 낮은지, `matchScan`이 3가지 오프셋 prior에서 참 pose를 <3cm/<2°로 복구하는지, 안 맞는 스캔(균일 1m 링)은 score 낮은지, `likelihoodFieldFromLogOdds` 임계값이 벽/가구를 가르는지(8개 체크).
 
 ## scripts/planner-wasm-smoke.mjs
 
