@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8" />
 <title>former-01 teleop</title>
+<!-- planner-node.js (re-exported by the nodes barrel) imports
+     '@ros-chromium/planner-wasm' by package name; the browser has no
+     package resolver, so map it to the served path. -->
+<script type="importmap">
+{ "imports": { "@ros-chromium/planner-wasm": "/packages/planner-wasm/src/index.js" } }
+</script>
 <style>
   body { font-family: ui-monospace, monospace; max-width: 640px; margin: 40px auto; padding: 0 16px; }
   h1 { font-size: 16px; }
@@ -57,13 +63,18 @@
   </div>
   <div class="row">last commanded: left=<span id="cmdLeft">0</span> right=<span id="cmdRight">0</span></div>
   <div class="row">
+    readback: batt <span id="rbBatt">–</span> V · temp <span id="rbTemp">–</span> °C ·
+    faults <span id="rbFault">–</span> · e-stop btn <span id="rbEstop">–</span> ·
+    wheel v <span id="rbVel">–</span> m/s
+  </div>
+  <div class="row">
     teleop ticks/s: <span id="teleopRate">–</span> · gamepad seen/s: <span id="teleopSeenRate">–</span> ·
     raw axes: <span id="teleopAxes">–</span>
   </div>
   <div class="row"><div id="log"></div></div>
 
   <script type="module">
-    import { startHeartbeat } from '../../packages/transport/src/index.js';
+    import { startHeartbeat, getCodec } from '../../packages/transport/src/index.js';
     import { loadManifest, createDriveDevice } from '../../packages/device-abstraction/src/index.js';
     import { LocalBus, HardwareBridgeClient } from '../../packages/bus/src/index.js';
     import { TeleopNode } from '../../packages/nodes/src/index.js';
@@ -113,6 +124,7 @@
     let transport = null; // HardwareBridgeClient (local) or RtcTransport (operator)
     let bus = null;
     let teleop = null;
+    let drive = null;
     let heartbeat = null; // set only in operator mode — see note below
     let sentCount = 0;
     let ackCount = 0;
@@ -131,10 +143,12 @@
       statusEl.className = 'disconnected';
       heartbeat?.stop();
       teleop?.stop();
+      drive?.stopReadback();
       bus?.close();
       transport = null;
       bus = null;
       teleop = null;
+      drive = null;
       heartbeat = null;
       connectBtn.disabled = false;
       log(`disconnected — ${reason}`);
@@ -149,16 +163,26 @@
       const manifest = await loadManifest(MANIFEST_URL);
       log(`manifest loaded: robot=${manifest.robot}`);
 
+      const codec = getCodec(manifest.transport?.kind, manifest);
       if (mode === 'operator') {
         const sigUrl = document.getElementById('sigUrl').value.trim();
         log(`operator mode — signaling via ${sigUrl}, robot ${manifest.robot}`);
         const sig = new SignalingClient(sigUrl, { role: 'operator', robot: manifest.robot });
-        transport = new RtcTransport(sig);
+        transport = new RtcTransport(sig, { codec });
       } else {
-        transport = new HardwareBridgeClient(WORKER_URL);
+        transport = new HardwareBridgeClient(WORKER_URL, { codec });
       }
 
-      const drive = createDriveDevice(transport, manifest);
+      drive = createDriveDevice(transport, manifest, {
+        readbackHz: 5,
+        onState: (s) => {
+          if (s.battery != null) document.getElementById('rbBatt').textContent = s.battery.toFixed(1);
+          if (s.temperature != null) document.getElementById('rbTemp').textContent = String(s.temperature);
+          if (s.faultFlags != null) document.getElementById('rbFault').textContent = s.faultFlags === 0 ? 'none' : `0x${s.faultFlags.toString(16)}`;
+          if (s.estopButton != null) document.getElementById('rbEstop').textContent = s.estopButton ? 'PRESSED' : 'clear';
+          if (s.velocity) document.getElementById('rbVel').textContent = `${s.velocity.left.toFixed(2)} / ${s.velocity.right.toFixed(2)}`;
+        },
+      });
       bus = new LocalBus(`ros-chromium/${manifest.robot}`);
 
       transport.onMessage((msg) => {
@@ -170,8 +194,6 @@
           hbAckCountEl.textContent = String(ackCount);
         }
       });
-      transport.onDisconnect(() => teardown(
-        mode === 'operator' ? 'data channel to the host closed' : 'worker lost its connection to the firmware sim'));
 
       if (mode === 'local') {
         // Heartbeating happens once, inside the shared worker; this tab just
@@ -198,6 +220,13 @@
       }
       statusEl.textContent = 'connected';
       statusEl.className = 'connected';
+
+      // Wire the teardown-on-disconnect only now — a shared worker can emit a
+      // stale "not connected" status while connect() is still in flight
+      // (leftover from a previous tab's session), and reacting to that mid
+      // -connect would null out transport/drive/bus under our own feet.
+      transport.onDisconnect(() => teardown(
+        mode === 'operator' ? 'data channel to the host closed' : 'worker lost its connection to the firmware sim'));
 
       if (mode === 'operator') {
         // RtcTransport carries no keepalive of its own — this tab owns it,

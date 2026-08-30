@@ -14,13 +14,21 @@
 //     This file has no protocol import.
 //   - the [-1, 1] normalized-velocity convention — a stack-wide contract
 //     (what TeleopNode and the sliders produce). drive.scale maps it to
-//     wire units. A real-units (m/s) API is a separate follow-up.
+//     wire units. setVelocityMps() converts real m/s to it via geometry.
 //
 // A drive.commands.* entry is either a string template (Roboteq ASCII line)
 // or a structured object (TB3's OpenCR write/read op). fillSpec handles both:
 // `${a.b}` refs in string leaves are resolved, and a leaf that is exactly
 // one `${ref}` keeps the referenced value's type (so a numeric wire field
 // stays a number, not "350").
+//
+// Optional readback: pass { readbackHz > 0 } and the device polls the
+// manifest's drive.readback.* queries and exposes getState() — wheel
+// velocity (m/s, from ?C count deltas), battery, current, temperature,
+// faultFlags, estopButton. The reply parsing assumes Roboteq unit
+// conventions (?V is tenths of a volt, ?DI 0 = pressed); a TB3 OpenCR
+// manifest will want per-field handling once the real control table is
+// known (todo-tb3.md).
 
 function resolve(ref, vars) {
   const val = ref.split('.').reduce((o, k) => (o == null ? o : o[k]), vars);
@@ -47,13 +55,37 @@ function fillSpec(spec, vars) {
   return spec;
 }
 
-export function createDriveDevice(transport, manifest) {
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+/** Top wheel speed (m/s) implied by geometry.maxWheelRpm + wheelRadius. */
+export function maxWheelMps(geometry = {}) {
+  if (!geometry.maxWheelRpm || !geometry.wheelRadius) return null;
+  return ((geometry.maxWheelRpm * 2 * Math.PI) / 60) * geometry.wheelRadius;
+}
+
+/** Real m/s -> the stack's normalized [-1, 1], clamped. Needs maxWheelMps. */
+export function mpsToNormalized(mps, geometry) {
+  const max = maxWheelMps(geometry);
+  if (!max) throw new Error('mpsToNormalized needs drive.geometry.maxWheelRpm and wheelRadius');
+  return Math.max(-1, Math.min(1, mps / max));
+}
+
+// query string ("?V 2") or structured read op -> the reply key a decoder
+// tags the answer with. Roboteq: first token after the leading punctuation
+// ("?V 2" -> "V"). Structured: spec.reply ?? spec.key.
+function replyKeyFor(spec) {
+  if (typeof spec === 'string') return spec.replace(/^[?~!^]+/, '').trim().split(/\s+/)[0];
+  return spec.reply ?? spec.key;
+}
+
+export function createDriveDevice(transport, manifest, { readbackHz = 0, onState } = {}) {
   const drive = manifest.drive;
   if (!drive || !drive.commands || !drive.commands.setVelocity) {
     throw new Error('manifest has no "drive.commands.setVelocity"');
   }
   const channels = drive.channels ?? { left: 1, right: 2 };
   const scale = drive.scale ?? 1000;
+  const geometry = drive.geometry ?? {};
   const send = (spec) => transport.send(transport.encode(fillSpec(spec, vars())));
 
   // normalized [-1, 1] -> wire units, clamped
@@ -65,6 +97,74 @@ export function createDriveDevice(transport, manifest) {
     ch: channels,
     v: { left: toUnits(lastLeft), right: toUnits(lastRight) },
   });
+
+  // --- readback state -------------------------------------------------
+  const state = {
+    counts: null, velocity: null, battery: null, current: null,
+    temperature: null, faultFlags: null, estopButton: null, updatedAt: 0,
+  };
+  let lastEnc = null; // { counts:[l,r], t }
+  const mPerCount = geometry.countsPerRev && geometry.wheelRadius
+    ? (2 * Math.PI * geometry.wheelRadius) / geometry.countsPerRev
+    : null;
+
+  const readback = drive.readback ?? {};
+  // field name (from the manifest) -> reply key -> how to fold it into state
+  const foldByField = {
+    encoder: (v) => {
+      state.counts = { left: v[0], right: v[1] };
+      const t = now();
+      if (lastEnc && mPerCount) {
+        const dt = (t - lastEnc.t) / 1000;
+        if (dt > 1e-3) {
+          state.velocity = {
+            left: ((v[0] - lastEnc.counts[0]) * mPerCount) / dt,
+            right: ((v[1] - lastEnc.counts[1]) * mPerCount) / dt,
+          };
+        }
+      }
+      lastEnc = { counts: [v[0], v[1]], t };
+    },
+    battery: (v) => { state.battery = v[0] / 10; },           // Roboteq ?V: tenths of a volt
+    current: (v) => { state.current = { left: v[0] / 10, right: v[1] / 10 }; }, // ?A: tenths of an amp
+    temperature: (v) => { state.temperature = v[0]; },
+    faultFlags: (v) => { state.faultFlags = v[0]; },
+    estopButton: (v) => { state.estopButton = v[0] === 0; }, // ?DI first input: 0 = pressed
+  };
+  const foldByKey = {};
+  const readbackSpecs = [];
+  for (const [field, spec] of Object.entries(readback)) {
+    if (!foldByField[field]) continue;
+    foldByKey[replyKeyFor(spec)] = foldByField[field];
+    readbackSpecs.push(spec);
+  }
+
+  let unsubMessage = null;
+  let rbTimer = null;
+
+  function startReadback() {
+    if (rbTimer || readbackSpecs.length === 0 || readbackHz <= 0) return;
+    if (!unsubMessage && typeof transport.onMessage === 'function') {
+      const handler = (msg) => {
+        if (!msg || msg.type !== 'reply') return;
+        const fold = foldByKey[msg.key];
+        if (!fold) return;
+        fold(msg.values);
+        state.updatedAt = Date.now();
+        if (onState) onState({ ...state });
+      };
+      transport.onMessage(handler);
+      unsubMessage = () => {}; // transport.onMessage has no unsubscribe; handler is idempotent
+    }
+    rbTimer = setInterval(() => {
+      for (const spec of readbackSpecs) transport.send(transport.encode(spec)).catch?.(() => {});
+    }, 1000 / readbackHz);
+  }
+  function stopReadback() {
+    if (rbTimer) clearInterval(rbTimer);
+    rbTimer = null;
+  }
+  if (readbackHz > 0) startReadback();
 
   return {
     // enable/estop are optional — a controller that comes up live just
@@ -80,7 +180,13 @@ export function createDriveDevice(transport, manifest) {
       lastRight = right;
       await send(drive.commands.setVelocity);
     },
-    // velocity readback (drive.readback.encoder) is still TODO — a poll
-    // loop deriving wheel speed from encoder-count deltas.
+    /** Real units. Needs drive.geometry.maxWheelRpm + wheelRadius. */
+    async setVelocityMps(leftMps, rightMps) {
+      await this.setVelocity(mpsToNormalized(leftMps, geometry), mpsToNormalized(rightMps, geometry));
+    },
+    /** Latest readback (all null until readback is running and replies arrive). */
+    getState: () => ({ ...state }),
+    startReadback,
+    stopReadback,
   };
 }

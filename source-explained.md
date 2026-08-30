@@ -68,7 +68,7 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 워커 안에는 진짜 `WebSocketTransport` 인스턴스가 딱 하나만 존재한다. 첫 번째 탭이 `{type:'connect'}`를 보내면 그때 실제로 `transport.connect()`를 호출하고 `startHeartbeat()`도 그때 한 번만 시작한다(`ensureConnected()`가 진행 중인 연결 시도를 프라미스로 캐싱해서 여러 탭이 동시에 연결을 요청해도 실제 연결 시도는 한 번만 일어나게 막는다). 이후 새로 열리는 탭은 이미 연결되어 있으면 그 상태를 바로 돌려받는다. 컨트롤러에서 오는 파싱된 메시지(`{type:'message', msg}`)와 연결 상태, keepalive 진단(간격 경고, 전송 실패)은 전부 `broadcast()`로 연결된 모든 포트에 똑같이 전달된다.
 
-`hardware-bridge-client.js`의 `HardwareBridgeClient`는 탭 쪽에서 이 워커에 붙는 프록시다. 의도적으로 `WebSocketTransport`와 같은 모양(`connect()`, `send()`, `onMessage()`, `onDisconnect()`)을 그대로 구현했다 — `packages/transport`의 `HardwareTransport` 인터페이스를 처음 만들 때 "구현체를 바꿔 끼워도 위 레이어는 안 건드린다"는 게 목적이었는데, 이번이 그 목적이 실제로 쓰인 첫 사례다. `createDriveDevice(transport, manifest)`는 `WebSocketTransport`를 받든 `HardwareBridgeClient`를 받든 코드 한 줄도 안 바뀐다.
+`hardware-bridge-client.js`의 `HardwareBridgeClient`는 탭 쪽에서 이 워커에 붙는 프록시다. 의도적으로 `WebSocketTransport`와 같은 모양(`connect()`, `send()`, `encode()`, `onMessage()`, `onDisconnect()`)을 그대로 구현했다 — `createDriveDevice(transport, manifest)`는 `WebSocketTransport`를 받든 `HardwareBridgeClient`를 받든 코드 한 줄도 안 바뀐다. 인코딩은 탭 쪽(`encode()` = 생성자 `{ codec = getCodec() }`)에서, 디코딩은 워커 쪽에서 한다(둘 다 기본 Roboteq). 요청/응답 상태를 공유하는 팩토리 코덱(TB3 OpenCR)은 이 워커 경계를 넘어 쪼갤 수 없지만, WebSerial 포트는 SharedWorker로 transfer가 안 되므로 그 조합은 애초에 안 생긴다.
 
 한 가지 의도적인 단순화: `send()`는 워커에 메시지를 posting만 하고 바로 resolve되는 fire-and-forget이다. 매 명령(특히 100ms마다 나가는 keepalive)마다 워커의 응답을 기다리는 왕복을 만들지 않기 위한 선택이고, 대신 전송이 실패하면 `onSendError` 콜백으로 비동기 통지된다.
 
@@ -84,7 +84,9 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 매니페스트에 **일부러 안 넣은 것** 두 가지: (1) 바이트 인코딩(라인 종결자·프레이밍)은 와이어 프로토콜 소관이라 `transport.encode()`(= `manifest.transport.kind`로 고른 코덱)에서 온다 — 이 파일은 프로토콜을 import하지 않는다. (2) 정규화 [-1, 1] 규약은 스택 전역 계약이라 코드에 둔다. 실단위(m/s) API는 별도 후속.
 
-속도 리드백(`drive.readback.encoder = "?C"`)은 `?C` 카운트 델타로 바퀴 속도를 뽑는 폴 루프가 아직 없어서 TODO.
+**리드백(opt-in)**: `createDriveDevice(transport, manifest, { readbackHz, onState })`. `readbackHz > 0`이면 `drive.readback.*` 쿼리들을 그 주기로 폴하고 `transport.onMessage`로 답을 받아 `getState()` → `{ counts, velocity(m/s), battery(V), current(A), temperature, faultFlags, estopButton, updatedAt }`에 접는다. 리플라이 키는 쿼리에서 유도(`"?V 2"` → `V`), 파싱은 Roboteq 관례 가정(`?V`는 0.1V 단위, `?DI` 첫 입력 0 = 눌림). 바퀴 속도는 `?C` 카운트 델타 / `mPerCount`(= `2π·wheelRadius/countsPerRev`) / dt. `startReadback()`/`stopReadback()`로 제어(연결 끊을 때 정지). TB3 OpenCR 매니페스트는 실제 컨트롤테이블 확정 후 필드별 처리가 필요할 수 있음(`todo-tb3.md`).
+
+**실단위 API**: `setVelocityMps(leftMps, rightMps)` — `maxWheelMps`(= `(maxWheelRpm·2π/60)·wheelRadius`)로 정규화 [-1,1]로 환산 후 `setVelocity`. `maxWheelMps`/`mpsToNormalized`도 export.
 
 ## packages/nodes/src/teleop-node.js
 
@@ -205,7 +207,9 @@ Node 내장 `http`/`fs`만 쓰는, 의존성 없는 정적 파일 서버. `apps/
 
 Phase 1~2에서는 연결성 테스트용 최소 페이지였는데, 이번 Phase 3에서 실제 게임패드 teleop 대시보드로 바뀌었다. 연결 흐름과 하트비트 진단 로직(중복 Connect 가드, 전송 간격 경고, 전송 실패 로그)은 이전 버전에서 그대로 가져왔고, `startHeartbeat` 헬퍼로 옮겨서 코드는 오히려 줄었다.
 
-Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/former.manifest.json`을 받아오고 → transport를 열고 → `createDriveDevice(transport, manifest)`로 주행 디바이스를 만들고 → 연결 후 `drive.enable()`(`!MG`)로 모터를 활성화하고 → `LocalBus`를 하나 만들어서 `former-01/drive/cmd_vel` 토픽을 구독해 들어오는 `{left, right}`를 그대로 `drive.setVelocity()`에 넘기고 → `TeleopNode`를 그 버스에 붙여 시작한다. 화면의 수동 슬라이더도 같은 토픽에 `publish`하는 것 말고는 하지 않는다 — 즉 게임패드든 수동 조작이든 마지막에 `drive.setVelocity()`를 호출하는 코드는 딱 한 군데(버스 구독 콜백)뿐이다.
+Connect를 누르면 순서대로: `loadManifest()`로 `/manifests/former.manifest.json`을 받아오고 → `getCodec(manifest.transport.kind, manifest)`로 코덱을 골라 transport에 넘기고 → `createDriveDevice(transport, manifest, { readbackHz: 5, onState })`로 주행 디바이스를 만들고(리드백 폴 켜짐 — `onState`가 batt/temp/fault/estop/wheel-v 화면 갱신) → 연결 후 `drive.enable()`(`!MG`) → `LocalBus`로 `former-01/drive/cmd_vel`를 구독해 `{left, right}`를 `drive.setVelocity()`에 넘기고 → `TeleopNode` 시작. 수동 슬라이더도 같은 토픽에 `publish`만 한다.
+
+`@ros-chromium/planner-wasm`이 nodes 배럴(→ `planner-node.js`) 경유로 bare specifier 들어오므로 `<head>`에 `<script type="importmap">` 필요(`nav.html`과 동일). `transport.onDisconnect(() => teardown())` 배선은 `await transport.connect()` **성공 후에만** — SharedWorker가 connect 진행 중에 이전 세션의 stale "not connected"를 흘리면 teardown이 transport/drive/bus를 스스로 null로 만들어버리기 때문(연결 중 실패는 connect()의 reject로 처리). `teardown()`에 `drive?.stopReadback()` 추가.
 
 Phase 4에서는 `WebSocketTransport`를 직접 여는 대신 `HardwareBridgeClient`를 연다는 점만 바뀌었다. `createDriveDevice`는 두 경우 모두 같은 방식으로 호출되므로(둘 다 `HardwareTransport` 모양을 구현하기 때문에) 이 위의 배선 설명은 그대로 유효하다. 달라진 건 하트비트 관련 UI 갱신 방식이다 — 이전엔 이 탭이 직접 `startHeartbeat`를 불렀지만, 지금은 그 호출 자체가 워커 안으로 옮겨갔기 때문에 이 탭은 `transport.onHeartbeatSent`/`onHeartbeatGap`/`onHeartbeatError`로 워커가 보내주는 소식을 받아 화면 숫자만 갱신한다.
 

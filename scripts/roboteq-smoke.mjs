@@ -80,6 +80,22 @@ try {
   // --- ack on a command ---------------------------------------------
   check('commands are acked with "+"', replies.some((m) => m.type === 'ack' && m.ok));
 
+  // --- readback: poll ?V/?A/?T/?FF/?DI/?C, expose getState() -------
+  // A separate device so we can stop its polling before the RWD test
+  // (readback traffic would otherwise keep the watchdog fed).
+  const driveRb = createDriveDevice(transport, manifest, { readbackHz: 25 });
+  await wait(300); // a few readback cycles while the wheels are still turning
+  const st = driveRb.getState();
+  check('readback: battery volts parsed from ?V', st.battery > 5 && st.battery < 60);
+  check('readback: temperature parsed from ?T', typeof st.temperature === 'number');
+  check('readback: faultFlags parsed from ?FF', st.faultFlags !== null);
+  check('readback: estopButton (not pressed) parsed from ?DI', st.estopButton === false);
+  check('readback: wheel velocity (m/s) derived from ?C deltas', st.velocity && st.velocity.left > 0 && st.velocity.right > 0);
+  await driveRb.setVelocityMps(0, 0); // exercise the m/s -> normalized conversion path
+  check('setVelocityMps: converts without throwing', true);
+  driveRb.stopReadback();
+  await wait(50);
+
   // --- !EX stops and latches --------------------------------------
   await drive.estop();
   await wait(50);

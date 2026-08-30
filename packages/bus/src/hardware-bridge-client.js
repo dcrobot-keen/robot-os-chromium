@@ -1,6 +1,6 @@
 // HardwareBridgeClient — the tab-side proxy for hardware-bridge-worker.js.
-// Implements the same connect()/send()/onMessage()/onDisconnect() shape as
-// HardwareTransport (see packages/transport/src/index.js), so
+// Implements the same connect()/send()/encode()/onMessage()/onDisconnect()
+// shape as HardwareTransport (see packages/transport/src/index.js), so
 // createDriveDevice() and anything else built against that interface works
 // unmodified whether it's handed a real WebSocketTransport or one of
 // these — swapping the transport implementation without touching the
@@ -8,12 +8,20 @@
 //
 // Every tab that constructs one of these shares the same underlying
 // hardware connection (there's exactly one real WebSocketTransport, living
-// in the worker) instead of each tab opening its own.
+// in the worker) instead of each tab opening its own. Encoding happens
+// here on the tab side (the worker just forwards the bytes); decoding
+// happens in the worker. Both default to the Roboteq codec. A factory
+// codec with request/response state (TB3's OpenCR) can't be split across
+// the worker boundary this way -- but that combination doesn't arise
+// (WebSerial ports aren't transferable to a SharedWorker anyway).
+
+import { getCodec } from '../../transport/src/codecs.js';
 
 export class HardwareBridgeClient {
-  constructor(workerUrl) {
+  constructor(workerUrl, { codec = getCodec() } = {}) {
     this._worker = new SharedWorker(workerUrl, { type: 'module', name: 'ros-chromium-hardware-bridge' });
     this._port = this._worker.port;
+    this._codec = codec;
     this._connected = false;
     this._connectResolve = null;
     this._connectReject = null;
@@ -77,6 +85,12 @@ export class HardwareBridgeClient {
   // round-tripping every single heartbeat, which isn't worth it here.
   async send(frame) {
     this._port.postMessage({ type: 'send', frame });
+  }
+
+  // Encode one command to wire bytes with this client's codec, so callers
+  // (createDriveDevice, OdometryNode) don't import a protocol module.
+  encode(spec) {
+    return this._codec.encode(spec);
   }
 
   onMessage(cb) {
