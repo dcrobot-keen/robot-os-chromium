@@ -18,7 +18,10 @@
 // vs. the Phase-7 hit/miss tally this replaces, the win is inertia: a wall
 // seen 30 times isn't erased by one noisy pass-through, and a corridor seen
 // free 30 times isn't turned into a wall by one spurious return. `reset()`,
-// `serialize()` and `load()` let a map be cleared / saved / reloaded.
+// `serialize()` and `load()` let a map be cleared / saved / reloaded --
+// load() also accepts a slicemap-v1 (iPhone-scan prior, Phase 9).
+
+import { parseSlicemap, slicemapGrid, slicemapToLogOdds } from './slicemap-prior.js';
 //
 // The published message keeps the Phase-7 shape so PlannerNode and the
 // dashboard are unchanged:
@@ -365,21 +368,31 @@ export class MapNode {
     return serializeMap(this._cfg, this._logOdds);
   }
 
-  /**
-   * Replace the current map with a saved one. The saved grid config must
-   * match this node's (same origin/cellSize/cols/rows) -- otherwise the
-   * cells wouldn't line up. Returns this.
-   */
-  load(saved) {
-    const { cfg, logOdds } = deserializeMap(saved);
+  _assertGridMatches(cfg, what) {
     const c = this._cfg;
     const same = cfg.cols === c.cols && cfg.rows === c.rows
       && Math.abs(cfg.originX - c.originX) < 1e-9 && Math.abs(cfg.originY - c.originY) < 1e-9
-      && Math.abs(cfg.cellSize - c.cellSize) < 1e-12;
-    if (!same) {
-      throw new Error('MapNode.load: saved grid config does not match this node\'s grid');
+      && Math.abs(cfg.cellSize - c.cellSize) < 1e-9;
+    if (!same) throw new Error(`MapNode.load: ${what} grid config does not match this node's grid`);
+  }
+
+  /**
+   * Replace the current map. Accepts either:
+   *  - a `serialize()` blob (format "mapnode-logodds-v1") -- restore a saved map;
+   *  - a `slicemap-v1` object -- seed the log-odds as a *prior* from an
+   *    iPhone-scan slice (walls strong, furniture weak; see slicemap-prior.js).
+   * The grid config must match this node's. Returns this.
+   */
+  load(obj, priorOpts) {
+    if (obj && obj.format === 'slicemap-v1') {
+      const slice = parseSlicemap(obj);
+      this._assertGridMatches(slicemapGrid(slice), 'slicemap');
+      this._logOdds.set(slicemapToLogOdds(slice, priorOpts));
+    } else {
+      const { cfg, logOdds } = deserializeMap(obj);
+      this._assertGridMatches(cfg, 'saved');
+      this._logOdds.set(logOdds);
     }
-    this._logOdds.set(logOdds);
     this._dirty = true;
     return this;
   }

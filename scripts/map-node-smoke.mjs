@@ -20,6 +20,9 @@ import {
   inflateOccupancy,
   clearDisc,
   MapNode,
+  parseSlicemap,
+  slicemapGrid,
+  slicemapToLogOdds,
 } from '@ros-chromium/nodes';
 import { loadPlanner } from '@ros-chromium/planner-wasm';
 import { LocalBus } from '@ros-chromium/bus';
@@ -96,6 +99,57 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   check('deserializeMap: grid config round-trips', JSON.stringify(cfg2) === JSON.stringify(cfg));
   const maxErr = Math.max(...[...lo].map((v, i) => Math.abs(v - lo2[i])));
   check('deserializeMap: log-odds round-trip within int8 quantization', maxErr <= 1 / 32 + 1e-6, `max err ${maxErr.toFixed(4)}`);
+}
+
+// --- 4c. slicemap-v1 prior: MapNode.load() seeds the log-odds (Phase 9) ---
+{
+  // 8x6 slicemap @ 0.1 m: a wall column at col 1, a furniture cell at (4,3),
+  // free everywhere else, one unknown at (7,5).
+  const cols = 8, rows = 6, res = 0.1;
+  const codes = new Uint8Array(cols * rows).fill(1); // FREE
+  for (let r = 0; r < rows; r++) codes[r * cols + 1] = 3; // OCC_WALL
+  codes[3 * cols + 4] = 2; // OCC_FURNITURE
+  codes[5 * cols + 7] = 0; // UNKNOWN
+  const blob = {
+    format: 'slicemap-v1', z: 0.18, band: 0.05, resolution: res,
+    origin: [-0.5, -0.5], cols, rows,
+    data: Buffer.from(codes).toString('base64'),
+  };
+
+  const slice = parseSlicemap(blob);
+  check('parseSlicemap: frame + codes length', slice.cols === cols && slice.resolution === res && slice.codes.length === cols * rows);
+  check('parseSlicemap: rejects non-slicemap', (() => { try { parseSlicemap({ format: 'x' }); return false; } catch { return true; } })());
+
+  const cfg = slicemapGrid(slice);
+  check('slicemapGrid: MapNode grid config shape', cfg.originX === -0.5 && cfg.cellSize === res && cfg.cols === cols && cfg.rows === rows);
+
+  const prior = slicemapToLogOdds(slice);
+  check('slicemapToLogOdds: wall > furniture > 0 > free', prior[0 * cols + 1] > prior[3 * cols + 4] && prior[3 * cols + 4] > 0 && prior[0] < 0);
+
+  const bus = new LocalBus('slicemap-prior-smoke');
+  const node = new MapNode(bus, { scanTopic: 'sc', poseTopic: 'po', mapTopic: 'mp', grid: cfg, publishHz: 50 });
+  node.load(blob);
+  const at = (arr, c, r) => arr[cellIndex(cfg, c, r)];
+  const m = node.snapshot();
+  check('MapNode.load(slicemap): wall cells come back occupied', at(m.occupied, 1, 0) === true && at(m.occupied, 1, 3) === true);
+  check('MapNode.load(slicemap): free cells come back free', at(m.occupied, 5, 2) === false);
+  check('MapNode.load(slicemap): furniture cell starts occupied (weak prior)', at(m.occupied, 4, 3) === true);
+
+  // self-heal: robot at cell (6,3), one beam sweeping -x through the
+  // furniture cell (4,3) and stopping just short of the wall column. The
+  // weak furniture prior gives way to the free sweep; the wall column,
+  // untouched by the beam, keeps its prior.
+  bus.publish('po', { x: (6 + 0.5) * res - 0.5, y: (3 + 0.5) * res - 0.5, theta: Math.PI });
+  const sweep = { angleMin: 0, angleIncrement: 0, rangeMin: 0.02, rangeMax: 3.5, ranges: [0.44] };
+  for (let i = 0; i < 8; i++) bus.publish('sc', sweep);
+  const m2 = node.snapshot();
+  check('MapNode: live free scans heal the furniture prior', at(m2.occupied, 4, 3) === false, `p=${(m2.prob[cellIndex(cfg, 4, 3)] / 255).toFixed(2)}`);
+  check('MapNode: the wall prior survives (beam stops short of it)', at(m2.occupied, 1, 3) === true, `p=${(m2.prob[cellIndex(cfg, 1, 3)] / 255).toFixed(2)}`);
+  check('MapNode.load(slicemap): rejects a mismatched grid', (() => {
+    try { node.load({ ...blob, cols: cols + 1 }); return false; } catch { return true; }
+  })());
+  node.stop();
+  bus.close();
 }
 
 // --- 5. inflateOccupancy: circular dilation by a metric radius ---

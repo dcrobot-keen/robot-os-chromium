@@ -4,3 +4,4 @@ export * from './path-follower-node.js';
 export * from './odometry-node.js';
 export * from './pose-fusion-node.js';
 export * from './map-node.js';
+export * from './slicemap-prior.js';

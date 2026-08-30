@@ -115,7 +115,16 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 설계 결정:
 - **Phase 8 — log-odds 이진 베이즈 필터**. 셀마다 `L` 값을 두고 빔마다 Amanatides–Woo 순회(`castRayCells`): 지나간 셀은 `L += free`(기본 −0.4), 끝 셀은 `L += occ`(+0.85; "no return" 빔은 끝 셀도 `free`). `L`을 `[min, max]`(기본 −2 ~ 3.5)로 클램프 → 신뢰도가 유계라서 오래된 벽/복도도 나중에 갱신 가능. `p = 1 − 1/(1+e^L)`, `L=0`이 `p=0.5`(미관측). `occupied`는 `p > threshold`(기본 0.5). Phase 7의 hit/miss 집계 대비 이점은 **관성** — 30번 본 벽이 노이즈 1발에 안 지워지고, 30번 비었던 복도가 반사 1발에 벽이 안 됨. `probFromLogOdds`/`occupancyFromLogOdds`/`probGridU8` export.
 - **`occupiedInflated` = `occupied`를 로봇 body 반경만큼 원형 팽창**(`inflateOccupancy`). pathfinder A*는 로봇을 점으로 보므로 PlannerNode 요청엔 이 팽창본을 넣는다. **현재 pose 셀은 강제 free**(`clearDisc`) — 팽창 벽이 자기 셀 덮으면 플래너가 `"start inside obstacle"`로 거부하기 때문.
-- **저장/로드**: `serialize()` → `{ format:'mapnode-logodds-v1', 격자 config, scale, data: base64(int8 양자화 L) }`. `load(saved)`는 격자 config가 일치해야 복원(안 그러면 셀이 안 맞음). `reset()`은 `L` 전부 0. `serializeMap`/`deserializeMap` export.
+- **저장/로드**: `serialize()` → `{ format:'mapnode-logodds-v1', 격자 config, scale, data: base64(int8 양자화 L) }`. `reset()`은 `L` 전부 0. `serializeMap`/`deserializeMap` export.
+- **`load(obj, priorOpts?)`** — 격자 config가 일치해야 함. `obj`가:
+  - `mapnode-logodds-v1` → 저장된 맵 복원.
+  - `slicemap-v1` (Phase 9, `slicemap-prior.js`) → iPhone 스캔 슬라이스를 **prior**로
+    시딩. `parseSlicemap` + `slicemapToLogOdds`: 벽 셀 → `L`=2.0(강한 +, clamp max
+    3.5 아래라 라이브 스캔 몇 번이면 갱신 가능), 가구 → 0.7(약해서 실제로 없으면
+    빨리 지워짐), free → −1.0, unknown → 0. 이후 `_integrate`가 평소대로 베이즈
+    갱신 → 치워진 의자는 로봇이 지나가며 자가 치유, 새 장애물은 채움. "iPhone
+    맵을 현실에 적용"의 문자적 구현. `slicemapGrid(slice)`가 슬라이스 프레임을
+    MapNode 격자 config로.
 - TF 없이 pose·scan을 명시적 bus 입력으로 받아 `world = pose ⊕ (range, angle)` 직접.
 - `publishHz`(기본 2) 타이머, 스캔이 하나라도 들어왔을 때만. `snapshot()`으로 동기 조회.
 
