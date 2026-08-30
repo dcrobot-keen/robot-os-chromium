@@ -1,0 +1,56 @@
+{
+  "robot": "tb3-burger-01",
+  "base": "turtlebot3-burger",
+  "_status": "PREPARED, NOT HARDWARE-VERIFIED. Every address in transport.controlTable and every scale below must be checked against the exact OpenCR firmware on the robot before the first real run — see todo-tb3.md. Stock OpenCR firmware (Option A): OpenCR is DYNAMIXEL id 200 with a control table; we read/write it over Protocol 2.0.",
+  "transport": {
+    "kind": "turtlebot3-opencr",
+    "device": "/dev/ttyACM0",
+    "baud": 1000000,
+    "dxlId": 200,
+    "usbFilter": { "usbVendorId": 8746, "usbProductId": 8815 },
+    "controlTable": {
+      "_note": "OpenCR turtlebot3_core control table. Common addresses shown; VERIFY. If the firmware exposes cmd_vel (linear_x/angular_z) instead of per-wheel goal velocity, switch drive.commands.setVelocity to write those two and add v.linearMps/v.angularRps to createDriveDevice.",
+      "millis": { "address": 10, "width": 4 },
+      "torqueEnable": { "address": 149, "width": 1 },
+      "goalVelocityLeft": { "address": 140, "width": 4, "signed": true },
+      "goalVelocityRight": { "address": 144, "width": 4, "signed": true },
+      "presentPositionLeft": { "address": 132, "width": 4, "signed": true },
+      "presentPositionRight": { "address": 136, "width": 4, "signed": true },
+      "presentVelocityLeft": { "address": 124, "width": 4, "signed": true },
+      "presentVelocityRight": { "address": 128, "width": 4, "signed": true },
+      "batteryVoltage": { "address": 90, "width": 4 },
+      "button": { "address": 97, "width": 1 }
+    }
+  },
+  "drive": {
+    "kind": "differential",
+    "channels": { "left": 0, "right": 1 },
+    "scale": 1000,
+    "commands": {
+      "init": [],
+      "enable": { "op": "write", "from": "torqueEnable", "value": 1 },
+      "estop": { "op": "write", "from": "torqueEnable", "value": 0 },
+      "setVelocity": {
+        "op": "write",
+        "from": "goalVelocityLeft",
+        "fields": [
+          { "value": "${v.left}", "width": 4, "signed": true },
+          { "value": "${v.right}", "width": 4, "signed": true }
+        ]
+      }
+    },
+    "geometry": { "wheelRadius": 0.033, "wheelSeparation": 0.16, "countsPerRev": 4096, "maxWheelRpm": 63.7 },
+    "readback": {
+      "encoder": { "op": "read", "key": "C" },
+      "battery": { "op": "read", "key": "battery" },
+      "button": { "op": "read", "key": "button" }
+    }
+  },
+  "lidar": {
+    "model": "lds01",
+    "device": "/dev/ttyUSB0",
+    "baud": 230400,
+    "usbFilter": { "usbVendorId": 4292, "usbProductId": 60000 },
+    "_note": "LDS-01 (HLS-LFCD2). LDS-02 Burgers use a different framing — not yet parsed; set model accordingly once known. Verify the USB VID/PID (CP2102 bridge is common: 10c4:ea60)."
+  }
+}

@@ -15,16 +15,36 @@
 //   - the [-1, 1] normalized-velocity convention — a stack-wide contract
 //     (what TeleopNode and the sliders produce). drive.scale maps it to
 //     wire units. A real-units (m/s) API is a separate follow-up.
+//
+// A drive.commands.* entry is either a string template (Roboteq ASCII line)
+// or a structured object (TB3's OpenCR write/read op). fillSpec handles both:
+// `${a.b}` refs in string leaves are resolved, and a leaf that is exactly
+// one `${ref}` keeps the referenced value's type (so a numeric wire field
+// stays a number, not "350").
 
-// Fill ${a.b} references in a manifest command template from `vars`.
+function resolve(ref, vars) {
+  const val = ref.split('.').reduce((o, k) => (o == null ? o : o[k]), vars);
+  if (val === undefined || val === null) {
+    throw new Error(`drive command references "${ref}", which the manifest does not provide`);
+  }
+  return val;
+}
+
 function fillTemplate(tpl, vars) {
-  return tpl.replace(/\$\{([\w.]+)\}/g, (_, ref) => {
-    const val = ref.split('.').reduce((o, k) => (o == null ? o : o[k]), vars);
-    if (val === undefined || val === null) {
-      throw new Error(`drive command template references "${ref}", which the manifest does not provide`);
-    }
-    return String(val);
-  });
+  const solo = /^\$\{([\w.]+)\}$/.exec(tpl);
+  if (solo) return resolve(solo[1], vars); // keep the value's type
+  return tpl.replace(/\$\{([\w.]+)\}/g, (_, ref) => String(resolve(ref, vars)));
+}
+
+function fillSpec(spec, vars) {
+  if (typeof spec === 'string') return fillTemplate(spec, vars);
+  if (Array.isArray(spec)) return spec.map((s) => fillSpec(s, vars));
+  if (spec && typeof spec === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(spec)) out[k] = fillSpec(v, vars);
+    return out;
+  }
+  return spec;
 }
 
 export function createDriveDevice(transport, manifest) {
@@ -34,10 +54,17 @@ export function createDriveDevice(transport, manifest) {
   }
   const channels = drive.channels ?? { left: 1, right: 2 };
   const scale = drive.scale ?? 1000;
-  const send = (line) => transport.send(transport.encode(line));
+  const send = (spec) => transport.send(transport.encode(fillSpec(spec, vars())));
 
   // normalized [-1, 1] -> wire units, clamped
   const toUnits = (v) => Math.max(-scale, Math.min(scale, Math.round(v * scale)));
+
+  let lastLeft = 0;
+  let lastRight = 0;
+  const vars = () => ({
+    ch: channels,
+    v: { left: toUnits(lastLeft), right: toUnits(lastRight) },
+  });
 
   return {
     // enable/estop are optional — a controller that comes up live just
@@ -49,10 +76,9 @@ export function createDriveDevice(transport, manifest) {
       if (drive.commands.estop) await send(drive.commands.estop);
     },
     async setVelocity(left, right) {
-      await send(fillTemplate(drive.commands.setVelocity, {
-        ch: channels,
-        v: { left: toUnits(left), right: toUnits(right) },
-      }));
+      lastLeft = left;
+      lastRight = right;
+      await send(drive.commands.setVelocity);
     },
     // velocity readback (drive.readback.encoder) is still TODO — a poll
     // loop deriving wheel speed from encoder-count deltas.

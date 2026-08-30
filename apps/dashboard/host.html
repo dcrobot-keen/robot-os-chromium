@@ -33,6 +33,15 @@
 
   <div class="row">Bridge: <span id="status" class="off">stopped</span></div>
   <div class="row">
+    Robot:
+    <select id="manifestSel">
+      <option value="former" selected>Former 2.0 (Roboteq)</option>
+      <option value="tb3">TurtleBot3 Burger (OpenCR)</option>
+      <option value="tb3-sim">TB3-sized simulator</option>
+    </select>
+    <span id="manifestInfo" style="color:#666"></span>
+  </div>
+  <div class="row">
     Controller:
     <label><input type="radio" name="fw" value="sim" checked /> simulator (WebSocket)</label>
     <label><input type="radio" name="fw" value="serial" /> hardware (WebSerial)</label>
@@ -58,7 +67,7 @@
 
   <script type="module">
     import { loadManifest } from '../../packages/device-abstraction/src/index.js';
-    import { WebSocketTransport, WebSerialTransport } from '../../packages/transport/src/index.js';
+    import { WebSocketTransport, WebSerialTransport, getCodec } from '../../packages/transport/src/index.js';
     import { SignalingClient, RtcHostBridge } from '../../packages/rtc/src/index.js';
 
     const statusEl = document.getElementById('status');
@@ -66,14 +75,22 @@
     const startBtn = document.getElementById('startBtn');
     const opsBody = document.querySelector('#ops tbody');
     const fwUrlRow = document.getElementById('fwUrlRow');
-    const MANIFEST_URL = '/manifests/former.manifest.json';
-    // Former's motor adapter — narrows the WebSerial port picker.
-    const SERIAL_FILTERS = [{ usbVendorId: 0x0403, usbProductId: 0x6001 }];
+    const manifestSel = document.getElementById('manifestSel');
+    const manifestInfo = document.getElementById('manifestInfo');
+    // Fallback WebSerial filter (Former's FTDI) when a manifest names none.
+    const DEFAULT_SERIAL_FILTERS = [{ usbVendorId: 0x0403, usbProductId: 0x6001 }];
+    const manifestUrlFor = (name) => `/manifests/${name}.manifest.json`;
 
     const fwModeOf = () => document.querySelector('input[name="fw"]:checked').value;
     for (const r of document.querySelectorAll('input[name="fw"]')) {
       r.addEventListener('change', () => { fwUrlRow.hidden = fwModeOf() !== 'sim'; });
     }
+    const ROBOT_ID_FOR = { former: 'former-01', tb3: 'tb3-burger-01', 'tb3-sim': 'tb3-sim-01' };
+    manifestSel.addEventListener('change', () => {
+      manifestInfo.textContent = '';
+      const rid = document.getElementById('robotId');
+      if (ROBOT_ID_FOR[manifestSel.value]) rid.value = ROBOT_ID_FOR[manifestSel.value];
+    });
 
     function log(msg) {
       const line = `[${new Date().toISOString()}] ${msg}`;
@@ -107,25 +124,34 @@
       const fwMode = fwModeOf();
 
       let manifest = null;
+      const manifestName = manifestSel.value;
       try {
-        manifest = await loadManifest(MANIFEST_URL);
-        log(`manifest loaded (robot=${manifest.robot}) — will publish it to the registry`);
+        manifest = await loadManifest(manifestUrlFor(manifestName));
+        manifestInfo.textContent = `${manifest.robot} · ${manifest.transport?.kind ?? 'roboteq-serial'}`;
+        log(`manifest "${manifestName}" loaded (robot=${manifest.robot}, kind=${manifest.transport?.kind}) — will publish it to the registry`);
       } catch (err) {
         log(`no manifest (${err.message || err}) — registering without one`);
       }
 
+      // The codec is chosen by the manifest's transport.kind (Roboteq ASCII
+      // for Former/sim, DYNAMIXEL Protocol 2.0 for TB3's OpenCR). A fresh
+      // codec per transport — the OpenCR one keeps a request queue.
+      const codecKind = manifest?.transport?.kind ?? 'roboteq-serial';
+      const makeCodec = () => getCodec(codecKind, manifest);
+
       // sim: multiple WebSocket connections are fine. hardware: WebSerial to
-      // the real Roboteq, plus the manifest's ^ECHOF 1 / !R 2 / !AC / !DC
-      // bring-up. (init is empty/harmless against the sim.)
+      // the real controller, plus the manifest's bring-up commands (empty for
+      // TB3, ^ECHOF 1 / !R 2 / !AC / !DC for the Former; harmless vs the sim).
       let makeTransport, initCommands = [];
       if (fwMode === 'serial') {
         const baud = manifest?.transport?.baud ?? 115200;
-        makeTransport = () => new WebSerialTransport({ baudRate: baud, filters: SERIAL_FILTERS });
+        const filters = manifest?.transport?.usbFilter ? [manifest.transport.usbFilter] : DEFAULT_SERIAL_FILTERS;
+        makeTransport = () => new WebSerialTransport({ baudRate: baud, filters, codec: makeCodec() });
         initCommands = manifest?.drive?.commands?.init ?? [];
-        log(`hardware mode — WebSerial @ ${baud}, ${initCommands.length} init command(s)`);
+        log(`hardware mode — WebSerial @ ${baud}, codec ${codecKind}, ${initCommands.length} init command(s)`);
       } else {
-        makeTransport = () => new WebSocketTransport(fwUrl);
-        log(`simulator mode — ${fwUrl}`);
+        makeTransport = () => new WebSocketTransport(fwUrl, { codec: makeCodec() });
+        log(`simulator mode — ${fwUrl}, codec ${codecKind}`);
       }
 
       const sig = new SignalingClient(sigUrl, { role: 'host', robot, manifest });

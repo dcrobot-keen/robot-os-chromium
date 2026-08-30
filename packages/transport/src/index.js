@@ -27,6 +27,9 @@
 //   - startHeartbeat — the "!B 3 1" keepalive loop (heartbeat.js).
 
 export * from './roboteq.js';
+export * from './dynamixel-protocol2.js';
+export * from './turtlebot3-opencr.js';
+export * from './lidar-lds.js';
 export * from './codecs.js';
 export * from './websocket-transport.js';
 export * from './web-serial-transport.js';

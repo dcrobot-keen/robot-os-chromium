@@ -18,26 +18,36 @@
 // is unchanged), and nothing above HardwareTransport moves.
 
 import { RoboteqDecoder, encodeCommand } from './roboteq.js';
+import { makeTurtlebot3OpenCRCodec, opencrConfigFromManifest } from './turtlebot3-opencr.js';
 
+// A registry entry is either a plain { Decoder, encode } (stateless — reused
+// across transports, like Roboteq) or { factory(manifest) -> { Decoder,
+// encode } } for codecs that need per-transport state (TB3's OpenCR, whose
+// encode/Decoder share a request queue since Protocol 2.0 status packets
+// don't echo the address they answer).
 export const CODECS = {
-  // Roboteq ASCII: encode() takes a command-line string and appends CR.
   'roboteq-serial': { Decoder: RoboteqDecoder, encode: encodeCommand },
+  'turtlebot3-opencr': {
+    factory: (manifest) => makeTurtlebot3OpenCRCodec(opencrConfigFromManifest(manifest ?? {})),
+  },
 };
 
 export const DEFAULT_CODEC_KIND = 'roboteq-serial';
 
 /**
  * Look up a codec by `transport.kind`. Defaults to Roboteq so every existing
- * call site (which passes no kind) is unchanged.
+ * call site (which passes nothing) is unchanged. Pass the manifest for
+ * factory codecs that read addresses/ids out of it (turtlebot3-opencr).
  * @param {string} [kind]
+ * @param {object} [manifest]
  * @returns {{ Decoder: new () => { push(bytes: Uint8Array): Iterable<object> }, encode: (spec: any) => Uint8Array }}
  */
-export function getCodec(kind = DEFAULT_CODEC_KIND) {
-  const codec = CODECS[kind];
-  if (!codec) {
+export function getCodec(kind = DEFAULT_CODEC_KIND, manifest) {
+  const entry = CODECS[kind];
+  if (!entry) {
     throw new Error(
       `unknown transport codec kind "${kind}" — registered: ${Object.keys(CODECS).join(', ')}`,
     );
   }
-  return codec;
+  return entry.factory ? entry.factory(manifest) : entry;
 }

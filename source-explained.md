@@ -18,7 +18,19 @@ Former 2.0 베이스(Roboteq 모터 컨트롤러)의 실제 시리얼 프로토�
 
 ## packages/transport/src/codecs.js
 
-와이어 프로토콜 코덱 레지스트리 — 매니페스트 `transport.kind`로 고른다. 코덱 = `{ Decoder, encode }`: `Decoder`는 `new Decoder().push(bytes)`로 정규화 메시지(`{type:'ack'|'reply'|'line',...}`)를 내는 클래스, `encode(spec)`은 명령 하나를 와이어 바이트로. `getCodec(kind='roboteq-serial')`가 조회하고 미등록 kind면 throw. 지금 등록된 건 `roboteq-serial`(`RoboteqDecoder` + `encodeCommand`) 하나. TB3 OpenCR(DYNAMIXEL Protocol 2.0)를 붙일 땐 여기 `turtlebot3-opencr` 항목 하나 추가 — `Decoder`가 엔코더 응답을 똑같이 `{type:'reply',key:'C',values:[l,r]}`로 내면 `OdometryNode`도 무변경. transport 3종(`WebSocket`/`WebSerial`/`Rtc`)이 생성자에서 `{ codec = getCodec() }`를 받아 `this._decoder = new codec.Decoder()`를 만들고 `encode(spec)` 메서드를 노출하므로, `packages/nodes`·`device-abstraction`·`rtc-host-bridge`는 코덱을 직접 import하지 않는다. roadmap.md "세 타깃 동시 진행" 참고.
+와이어 프로토콜 코덱 레지스트리 — 매니페스트 `transport.kind`로 고른다. 코덱 = `{ Decoder, encode }`: `Decoder`는 `new Decoder().push(bytes)`로 정규화 메시지(`{type:'ack'|'reply'|'line',...}`)를 내는 클래스, `encode(spec)`은 명령 하나를 와이어 바이트로. `getCodec(kind, manifest?)`가 조회하고 미등록 kind면 throw. 레지스트리 항목은 (a) 정적 `{ Decoder, encode }`(무상태, 재사용 — Roboteq) 또는 (b) `{ factory(manifest) → { Decoder, encode } }`(transport마다 새 인스턴스 필요 — TB3). 등록된 것: `roboteq-serial`(`RoboteqDecoder` + `encodeCommand`), `turtlebot3-opencr`(팩토리 → `makeTurtlebot3OpenCRCodec(opencrConfigFromManifest(manifest))`). transport 3종(`WebSocket`/`WebSerial`/`Rtc`)이 생성자에서 `{ codec = getCodec() }`를 받아 `this._decoder = new codec.Decoder()`를 만들고 `encode(spec)` 메서드를 노출하므로, `packages/nodes`·`device-abstraction`·`rtc-host-bridge`는 코덱을 직접 import하지 않는다. roadmap.md "세 타깃 동시 진행" 참고.
+
+## packages/transport/src/dynamixel-protocol2.js
+
+DYNAMIXEL Protocol 2.0 와이어 포맷 — TB3의 OpenCR 보드가 쓰는 것(OpenCR은 컨트롤테이블을 가진 DXL 장치 id 200으로 행세). 프로토콜 표준이라 TB3 비의존. 패킷: `FF FF FD 00 | ID | LEN(LE 2) | INSTR | PARAMS | CRC(LE 2)`, LEN은 INSTR부터 CRC까지. `crc16`(poly 0x8005, MSB-first, ROBOTIS SDK 테이블), `stuff`/`unstuff`(PARAMS 안 `FF FF FD` → `FF FF FD FD`), `toLE`/`fromLE`(2의 보수). `buildRead`/`buildWrite`/`buildPing`/`buildInstruction`. `Protocol2Decoder.push(bytes)` → `{ id, error, params }` 배열, STATUS 패킷만 통과, 헤더 재동기 + CRC 불일치 드롭, push 경계 걸쳐도 파싱. 스모크는 ROBOTIS e-manual 레퍼런스 벡터(PING id1, WRITE id1 addr116=512) CRC까지 대조.
+
+## packages/transport/src/turtlebot3-opencr.js
+
+`codecs.js`용 코덱 팩토리 — HardwareTransport 호출을 OpenCR 컨트롤테이블 R/W로 바꾸고, 응답을 `roboteq.js`와 **같은** 정규화 메시지로 되돌려 `packages/nodes`(특히 `OdometryNode`)를 무변경으로 만든다. Protocol 2.0 STATUS 패킷이 어느 주소에 대한 응답인지 안 알려주므로 `encode`와 `Decoder`가 작은 FIFO(`pending`)를 공유 — 그래서 `codecs.js`가 이 코덱만 transport마다 팩토리로 새로 만든다. `encode({op:'read', key})`는 `reads[key]`(필드 offset/width/signed) 조회 → READ 패킷 + `pending`에 push. `encode({op:'write', from:'<컨트롤테이블명>', value})` 또는 `{op:'write', address, fields:[{value,width,signed}]}` → WRITE 패킷. `Decoder.push`는 STATUS마다 `pending.shift()`: read면 필드 적용해 `{type:'reply', key, values}`, write/ping이면 `{type:'ack', ok: error===0}`. `opencrConfigFromManifest(manifest)`가 `transport.controlTable`의 `presentPositionLeft/Right`(연속 주소 가정)를 read 그룹 `C`로 조립. **주소는 전부 매니페스트에 있고 하드웨어에서 검증 필요 — `todo-tb3.md`.**
+
+## packages/transport/src/lidar-lds.js
+
+TB3 Burger 라이다(ROBOTIS LDS-01 = HLS-LFCD2) 시리얼 파서. 출력은 시뮬레이터 센서 스트림(`:8766`)이 이미 `MapNode`에 주는 것과 **같은** 스캔 객체 모양이라 실물 전환 시 위쪽 무변경. LDS-01: 1회전 = 90패킷 × 4샘플, 패킷 22바이트(`0xFA` + index `0xA0..0xF9` + 속도 uint16 + 4×4바이트 샘플 + 체크섬 uint16). `ldsChecksum`(20바이트에 대한 10개 uint16 워드, `chk32 = (chk32<<1) + word`, `((chk32 & 0x7FFF) + (chk32>>15)) & 0x7FFF`). `LdsDecoder.push(bytes)` → 완성된 회전마다 `{ type:'scan', angleMin..rangeMax, ranges[360] (m, ≥rangeMax = no return), rpm }`. invalid 플래그/거리 0 → rangeMax. index가 되감기면 회전 경계 → flush. LDS-02는 framing 달라서 미지원(`model` 파라미터). `buildLdsPacket`은 스모크용.
 
 ## packages/transport/src/websocket-transport.js
 
@@ -68,7 +80,7 @@ Phase 4(plan.md)에서 추가한, 하드웨어 연결을 탭 여러 개가 공�
 
 `createDriveDevice(transport, manifest)`는 **디바이스 무관**하다. 명령 어휘를 코드에 박지 않고 전부 매니페스트에서 읽는다 — `drive.commands`(`enable`/`estop`/`setVelocity` 템플릿), `drive.channels`(`{left, right}` 채널 번호), `drive.scale`(정규화 → 와이어 단위 스케일). 그래서 같은 와이어 프로토콜을 쓰는 다른 디퍼렌셜 베이스는 이 파일을 안 건드리고 매니페스트 파일만 새로 쓰면 된다(plan.md Phase 3의 "로봇마다 바뀌는 건 매니페스트 하나" 목표).
 
-`setVelocity(left, right)`는 정규화 [-1, 1](TeleopNode·슬라이더가 내는 값)을 받아 `toUnits`로 `±scale`(Former은 1000 = ±200 바퀴 RPM)로 클램프한 뒤, `drive.commands.setVelocity` 템플릿의 `${ch.left}`/`${ch.right}`/`${v.left}`/`${v.right}` 자리를 채워 보낸다 — Former 매니페스트에선 `"!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"` → `!G 1 500_!G 2 -300` 식. `enable()`/`estop()`은 템플릿이 있으면 그대로 보내고 없으면 no-op(연결/ESTOP/워치독 이후 모터가 비활성으로 시작하므로 연결 후 `enable()` 한 번 필요; 매니페스트에 `!MG`/`!EX`).
+`setVelocity(left, right)`는 정규화 [-1, 1](TeleopNode·슬라이더가 내는 값)을 받아 `toUnits`로 `±scale`(Former은 1000 = ±200 바퀴 RPM)로 클램프한 뒤, `drive.commands.setVelocity`를 채워 보낸다. `drive.commands.*` 항목은 **문자열 템플릿**(Roboteq ASCII 라인)이거나 **구조화 객체**(TB3 OpenCR write/read op)일 수 있고, `fillSpec`가 둘 다 처리한다 — 문자열 leaf의 `${a.b}` 참조를 해석하고, **정확히 `"${ref}"` 하나뿐인 leaf는 참조 값의 타입을 유지**(그래서 수치 와이어 필드가 `"350"`이 아니라 `350`으로 남음). Former: `"!G ${ch.left} ${v.left}_!G ${ch.right} ${v.right}"` → `!G 1 500_!G 2 -300`. TB3: `{op:'write', from:'goalVelocityLeft', fields:[{value:'${v.left}',width:4,signed:true},{value:'${v.right}',width:4,signed:true}]}` → 코덱이 Protocol 2.0 WRITE 패킷으로. `enable()`/`estop()`은 항목이 있으면 채워 보내고 없으면 no-op(연결/ESTOP/워치독 이후 모터가 비활성으로 시작하므로 연결 후 `enable()` 한 번 필요; Former은 `!MG`/`!EX`, TB3는 `torqueEnable` write 1/0).
 
 매니페스트에 **일부러 안 넣은 것** 두 가지: (1) 바이트 인코딩(라인 종결자·프레이밍)은 와이어 프로토콜 소관이라 `transport.encode()`(= `manifest.transport.kind`로 고른 코덱)에서 온다 — 이 파일은 프로토콜을 import하지 않는다. (2) 정규화 [-1, 1] 규약은 스택 전역 계약이라 코드에 둔다. 실단위(m/s) API는 별도 후속.
 
