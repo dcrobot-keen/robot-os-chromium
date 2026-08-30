@@ -146,6 +146,20 @@ roadmap.md Phase 9 step 4 ("9a") — correlative scan matching. "맵 + 오도메
 
 박스 방 raycast로 합성 스캔 + likelihood field. `scoreScan`이 참 pose에서 높고 어긋난 pose에서 낮은지, `matchScan`이 3가지 오프셋 prior에서 참 pose를 <3cm/<2°로 복구하는지, 안 맞는 스캔(균일 1m 링)은 score 낮은지, `likelihoodFieldFromLogOdds` 임계값이 벽/가구를 가르는지(8개 체크).
 
+## packages/nodes/src/localization-node.js
+
+roadmap.md Phase 9 step 5. `scan-matcher.js`를 매 스캔 돌려 정적 맵(iPhone 슬라이스, 벽 셀) 상대 pose를 뽑고 `correctionTopic`에 발행 — `PoseFusionNode`가 VPS fix를 융합하는 바로 그 토픽. VPS 없는 TB3에선 이게 절대 fix 소스: `OdometryNode`가 연속 dead-reckoning, `LocalizationNode`가 사전 맵으로 당겨온다.
+
+- 스캔 사이엔 오도메트리 델타로 추정치를 carry-forward(`applyOdomDelta` — `map→odom` 변환은 고정, pose가 odom 따라 이동). `_onOdom`이 `_mapPose`를 갱신.
+- `_onScan`: `matchScan(field, _mapPose(prior), scan)`. `score ≥ minScore`(추적 기본 0.35)면 `_mapPose = 결과`, correction 발행. 아니면 `_lowStreak++`, `lostAfter`(기본 5) 연속이면 `_lost` → **발행 중단**(PoseFusion이 오도메트리로 coasting) + 탐색창 확대(`relocalizeWindowM/Rad`).
+- 재획득 문턱 `relocalizeMinScore`(기본 0.6 — 확대 탐색은 스퍼리어스 고득점을 더 잘 찾아서 추적 문턱보다 엄격).
+- `setPose({x,y,theta})` — "2D Pose Estimate" 훅(맵 클릭). `getPose()`.
+- `onEvent({type:'match'|'weak'|'lost'|'relocalized'|'set-pose', score, pose})`.
+
+## scripts/localization-node-smoke.mjs
+
+박스 방 + 참 궤적 + 6% 슬립 & yaw 바이어스로 드리프트하는 오도메트리 스트림. `LocalizationNode`가 스캔 매칭 correction으로 추정치를 참값에 고정하는지 — **correction 오차 3.1cm vs raw 오도메트리 오차 94.6cm** (30배). 오도메트리 carry-forward, `setPose`, lost/relocalize(노이즈 스캔 → lost → 실제 스캔 → relocalized 1.00) 검증(8개 체크).
+
 ## scripts/planner-wasm-smoke.mjs
 
 `planner-wasm` + `PlannerNode`를 브라우저 없이 검증하는 스모크 테스트. pathfinder의 Go 테스트가 이미 다루는 시나리오(열린 공간, 벽 우회, Hybrid A*, 완전히 막힌 목적지)를 WASM 경유로 재확인하고, `grid.NewGridFromOccupancy`(원시 점유 비트맵) 경로가 동등한 폴리곤 기반 경로와 같은 결과를 내는지, 그리고 `PlannerNode`를 통한 `LocalBus` 요청/응답 왕복까지 확인한다(6개 체크). `node scripts/planner-wasm-smoke.mjs`. 2026-08-29에 이 스모크 테스트와 별개로, 실제 Chromium(Node/V8이 아니라)에서 `findPath`를 직접 호출해 동일한 결과(거리 9.806, 경로점 41개)가 나오는 것도 수동으로 확인했다.

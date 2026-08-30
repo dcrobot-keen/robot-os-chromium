@@ -51,6 +51,16 @@ export function slicemapGrid(slice) {
 }
 
 /**
+ * slicemap codes -> a Uint8Array wall mask (1 where OCC_WALL), for
+ * buildLikelihoodField() -- localization matches structure, not furniture.
+ */
+export function wallMaskFromSlicemap(slice) {
+  const m = new Uint8Array(slice.codes.length);
+  for (let i = 0; i < m.length; i++) m[i] = slice.codes[i] === SLICE_CODE.OCC_WALL ? 1 : 0;
+  return m;
+}
+
+/**
  * slicemap codes -> a Float32Array of prior log-odds, one per cell, matching
  * MapNode's row-major indexing.
  * @param {object} slice - parseSlicemap() output
