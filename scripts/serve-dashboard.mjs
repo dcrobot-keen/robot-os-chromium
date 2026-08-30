@@ -15,7 +15,10 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = Number(process.env.DASHBOARD_PORT || 5173);
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json' };
+const MIME = {
+  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
+  '.json': 'application/json', '.wasm': 'application/wasm',
+};
 
 const server = http.createServer((req, res) => {
   const reqPath = decodeURIComponent(req.url.split('?')[0]);

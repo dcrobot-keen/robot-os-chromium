@@ -203,6 +203,20 @@ Phase 5에서 모드 선택(`local` / `operator`)이 추가됐다. `local`은 �
 
 이 페이지가 존재하는 이유는 단 하나, 지금까지의 모든 검증이 Node.js끼리의 통신이었고 실제 브라우저 탭은 이 흐름에 한 번도 들어온 적이 없었기 때문이다. `scripts/serve-dashboard.mjs`로 서빙한 뒤 `http://localhost:5173/apps/dashboard/index.html`로 열어야 한다.
 
+## apps/dashboard/nav.html
+
+roadmap.md Phase 7의 통과 페이지 — 시뮬레이터 상대로 **브라우저 안에서** nav 스택 전체를 돌린다. `apps/sim-driver`(Node)도, pathfinder 서버도 필요 없다. 페이지가 직접:
+
+- `WebSocketTransport('ws://127.0.0.1:8765')` (Roboteq) + raw `WebSocket('ws://127.0.0.1:8766')` (센서 스트림)에 붙는다.
+- **[Connect]** — 매니페스트(`tb3-sim`) 로드 → transport 연결 → init 시퀀스 → `createDriveDevice` → `startHeartbeat` → `drive.enable()`(`!MG`) → `OdometryNode` + `PoseFusionNode` 생성 + bus 구독 배선.
+- **[Start mapping]** — `MapNode`(격자 `gridConfigFromBounds([-1,-1]..[16,12], 0.05m)`, 인플레이션 0.18m) + `PlannerNode`(WASM 로드) + `PathFollowerNode` 생성, 그리고 센서 WS 오픈. 센서 프레임마다: `scan`을 `sim/scan`에 발행, 1.5초마다 ground truth + 가우시안 노이즈를 `sim/correction`에 발행(VPS 대역). 첫 correction 전엔 `scan`을 안 흘려서 MapNode가 (0,0) 콜드스타트 pose에서 래스터화하는 걸 막는다.
+- **캔버스 클릭** — 클릭 좌표를 월드 좌표로 변환 → `mapNode.snapshot()`의 `occupiedInflated`(팽창본)를 `occupied`로, 현재 fused pose를 start로, 클릭점을 goal로 해서 `sim/plan-request` 발행. `PlannerNode` 응답(`sim/plan-result`)이 오면 경로를 `sim/path`에 발행 → `PathFollowerNode`가 pure pursuit로 `sim/drive/cmd_vel` 발행 → 버스 구독이 `drive.setVelocity()` 호출 → 시뮬레이터 주행.
+- rAF 루프가 캔버스에 그린다: 점유격자(벽=검정, 팽창=회색, `MapNode` 발행 때 오프스크린 캔버스로 래스터), fused pose(초록 삼각), odom 고스트(점선), 레이저 스캔점(빨강), 계획 경로(파랑), goal 마커.
+
+`@ros-chromium/planner-wasm`이 `planner-node.js`에서 bare specifier로 import되므로 — 브라우저엔 패키지 리졸버가 없다 — 페이지 `<head>`의 `<script type="importmap">`로 서빙 경로에 매핑한다. `serve-dashboard.mjs` MIME 맵에 `.wasm`도 추가했다.
+
+**Phase 7 통과 확인(2026-08-30, 실제 Chrome)**: open 월드에서 시작(1,1) → 클릭 → PlannerNode 108점/6.19m 경로 → PathFollowerNode 추종 → 로봇이 목표로 자율 주행, 맵은 주행 중 계속 채워짐. 순수 pure pursuit는 목표가 뒤/급격한 옆에 있으면 forward-only라 기어가는 데드존이 있어서 `pursuitStep`에 "헤딩에서 크게(>~57°) 벗어나면 제자리 회전" 분기를 추가했다(스모크에 케이스 추가).
+
 ### 실사용 테스트 히스토리
 
 첫 실사용 테스트에서 탭이 포그라운드에 있고 사용자가 계속 버튼을 누르고 있었는데도 하트비트가 23초 가까이 끊겨 ESTOP이 발동하는 원인 불명의 현상이 있었다. 진단 로직(중복 Connect 가드, 전송 간격 경고, 전송 실패 로그, sent/ack 카운터 분리)을 추가한 뒤 같은 방식(탭을 직접 닫는 것)으로 재시도했을 때는 경고 없이 깨끗하게 재현됐다 — `connection closed` 후 311ms 만에 ESTOP. 처음 현상은 재현되지 않아 일회성 현상으로 기록해뒀다.

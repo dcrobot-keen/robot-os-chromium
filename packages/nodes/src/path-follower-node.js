@@ -40,12 +40,15 @@ export function findLookaheadPoint(path, pose, lookaheadM, fromIndex = 0) {
  * @param {number[][]} path - [[x,y], ...] in the same frame as pose
  * @param {{x:number,y:number,theta:number}} pose
  * @param {{wheelRadius:number, wheelSeparation:number, maxWheelRpm:number}} geometry
- * @param {{lookaheadM?:number, cruiseMps?:number, goalToleranceM?:number, startIndex?:number}} [options]
+ * @param {{lookaheadM?:number, cruiseMps?:number, goalToleranceM?:number, startIndex?:number, turnInPlaceRad?:number, turnGain?:number}} [options]
  * @returns {{left:number, right:number, atGoal:boolean, lookaheadIndex:number}}
  *   left/right are normalized [-1,1], ready for createDriveDevice.setVelocity.
  */
 export function pursuitStep(path, pose, geometry, options = {}) {
-  const { lookaheadM = 0.3, cruiseMps = 0.12, goalToleranceM = 0.1, startIndex = 0 } = options;
+  const {
+    lookaheadM = 0.3, cruiseMps = 0.12, goalToleranceM = 0.1, startIndex = 0,
+    turnInPlaceRad = 1.0, turnGain = 0.35,
+  } = options;
 
   const goal = path[path.length - 1];
   const distToGoal = Math.hypot(goal[0] - pose.x, goal[1] - pose.y);
@@ -55,6 +58,18 @@ export function pursuitStep(path, pose, geometry, options = {}) {
 
   const { point: lookahead, index } = findLookaheadPoint(path, pose, lookaheadM, startIndex);
   const local = toRobotFrame(lookahead, pose);
+
+  // Pure pursuit is forward-only: if the target is well off the current
+  // heading (behind, or sharply to one side) the arc it would follow is
+  // tiny and the robot crawls off in the wrong direction. A differential
+  // -drive base can spin in place, so above turnInPlaceRad just rotate
+  // toward the target first, then hand back to pursuit once roughly aligned.
+  const bearing = Math.atan2(local.y, local.x);
+  if (Math.abs(bearing) > turnInPlaceRad) {
+    const s = Math.sign(bearing); // +1: target to the left -> turn left (omega>0 -> vR>vL)
+    return { left: -s * turnGain, right: s * turnGain, atGoal: false, lookaheadIndex: index };
+  }
+
   const l2 = local.x * local.x + local.y * local.y;
   // Standard pure-pursuit curvature: kappa = 2y / L^2 (Coulter 1992). l2 can't
   // be 0 here -- findLookaheadPoint only returns a point already >= some

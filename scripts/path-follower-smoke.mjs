@@ -82,6 +82,16 @@ function integrate(pose, left, right, dt) {
   check('pursuitStep: offset to the left steers right (left wheel is the outer/faster one)', result.left > result.right, `left=${result.left.toFixed(4)} right=${result.right.toFixed(4)}`);
 }
 
+// --- 5b. pursuitStep: a target behind the robot -> spin in place, don't crawl off ---
+{
+  // path goes to -x; robot faces +x, so the goal is directly behind it.
+  const path = [[0, 0], [-1, 0], [-2, 0]];
+  const result = pursuitStep(path, { x: 0, y: 0, theta: 0 }, TB3_GEOMETRY, { lookaheadM: 0.5 });
+  check('pursuitStep: target behind -> point turn (wheels opposite, near-zero net forward)',
+    Math.sign(result.left) === -Math.sign(result.right) && Math.abs(result.left + result.right) < 1e-9,
+    `left=${result.left.toFixed(3)} right=${result.right.toFixed(3)}`);
+}
+
 // --- 6. end-to-end convergence: integrate real control loop ticks, must reach the goal ---
 {
   const path = [[0, 0], [1, 0], [1, 1], [0, 1]]; // an L-shaped path

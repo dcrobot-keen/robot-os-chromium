@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<title>nav — Phase 7 2D view</title>
+<!-- planner-node.js imports '@ros-chromium/planner-wasm' by package name;
+     the browser has no package resolver, so map it to the served path. -->
+<script type="importmap">
+{ "imports": { "@ros-chromium/planner-wasm": "/packages/planner-wasm/src/index.js" } }
+</script>
+<style>
+  body { font-family: ui-monospace, monospace; margin: 0; background: #f4f4f4; color: #222; }
+  header { padding: 10px 16px; background: #fff; border-bottom: 1px solid #ddd; }
+  h1 { font-size: 15px; margin: 0 0 6px; }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+  button { font-family: inherit; padding: 5px 12px; }
+  #status { font-weight: bold; }
+  .connected { color: #2a7d2a; } .disconnected { color: #a33; }
+  main { display: flex; gap: 12px; padding: 12px 16px; align-items: flex-start; }
+  #view { background: #fff; border: 1px solid #ccc; cursor: crosshair; touch-action: none; }
+  aside { width: 340px; font-size: 12px; }
+  #log { background: #111; color: #ddd; padding: 8px; height: 340px; overflow-y: auto; font-size: 11px; white-space: pre-wrap; }
+  .kv { margin: 3px 0; } .kv b { display: inline-block; width: 130px; color: #555; font-weight: normal; }
+  .legend span { display: inline-block; margin-right: 10px; }
+  .sw { display: inline-block; width: 10px; height: 10px; vertical-align: middle; margin-right: 3px; border: 1px solid #999; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>nav — 시뮬레이터 상대 in-browser Nav 스택 (roadmap.md Phase 7)</h1>
+    <div class="controls">
+      Connection: <span id="status" class="disconnected">disconnected</span>
+      <button id="connectBtn">Connect</button>
+      <button id="mapBtn" disabled>Start mapping</button>
+      <button id="enableBtn" disabled>Enable (!MG)</button>
+      <button id="estopBtn" disabled>E-STOP</button>
+      <button id="clearBtn" disabled>Clear goal/path</button>
+      <button id="resetMapBtn" disabled>Reset map</button>
+      <label><input type="checkbox" id="showOdom" checked /> odom ghost</label>
+      <label><input type="checkbox" id="showScan" checked /> laser</label>
+      <span class="legend">
+        <span><i class="sw" style="background:#1e1e1e"></i>wall</span>
+        <span><i class="sw" style="background:#b4b4b4"></i>inflated</span>
+        <span><i class="sw" style="background:#e5484d"></i>scan</span>
+        <span><i class="sw" style="background:#2a7d2a"></i>pose</span>
+        <span><i class="sw" style="background:#3060c0"></i>path</span>
+      </span>
+    </div>
+  </header>
+
+  <main>
+    <canvas id="view" width="760" height="560"></canvas>
+    <aside>
+      <div class="kv"><b>fused pose</b><span id="kPose">–</span></div>
+      <div class="kv"><b>odom pose</b><span id="kOdom">–</span></div>
+      <div class="kv"><b>drift (gt−odom)</b><span id="kDrift">–</span></div>
+      <div class="kv"><b>map cells</b><span id="kMap">–</span></div>
+      <div class="kv"><b>last plan</b><span id="kPlan">–</span></div>
+      <div class="kv"><b>cmd_vel</b><span id="kCmd">–</span></div>
+      <div id="log"></div>
+    </aside>
+  </main>
+
+  <script type="module">
+    import { WebSocketTransport, startHeartbeat } from '../../packages/transport/src/index.js';
+    import { loadManifest, createDriveDevice } from '../../packages/device-abstraction/src/index.js';
+    import { LocalBus } from '../../packages/bus/src/index.js';
+    import {
+      OdometryNode, PoseFusionNode, MapNode, PlannerNode, PathFollowerNode,
+      gridConfigFromBounds,
+    } from '../../packages/nodes/src/index.js';
+
+    const ROBOTEQ_URL = 'ws://127.0.0.1:8765';
+    const SENSOR_URL = 'ws://127.0.0.1:8766';
+    const MANIFEST_URL = '/manifests/tb3-sim.manifest.json';
+    const R = 'sim';
+    const T = {
+      odom: `${R}/odom`, corr: `${R}/correction`, pose: `${R}/pose`, scan: `${R}/scan`,
+      map: `${R}/map`, planReq: `${R}/plan-request`, planRes: `${R}/plan-result`,
+      path: `${R}/path`, cmd: `${R}/drive/cmd_vel`,
+    };
+    const GRID = gridConfigFromBounds({ minX: -1, minY: -1, maxX: 16, maxY: 12 }, 0.05);
+    const INFLATION_M = 0.18;
+    const CORRECTION_MS = 1500, SIG_M = 0.04, SIG_RAD = 0.03;
+
+    const $ = (id) => document.getElementById(id);
+    const canvas = $('view'), ctx = canvas.getContext('2d');
+    const statusEl = $('status'), logEl = $('log');
+    const LOG_LINES = 200; // cap so a long session doesn't grow one giant text node
+    const logBuf = [];
+    const log = (m) => {
+      logBuf.push(`[${new Date().toISOString().slice(11, 19)}] ${m}`);
+      if (logBuf.length > LOG_LINES) logBuf.splice(0, logBuf.length - LOG_LINES);
+      logEl.textContent = logBuf.join('\n'); logEl.scrollTop = logEl.scrollHeight;
+      console.log('[nav] ' + m);
+    };
+    window.addEventListener('error', (e) => log(`window error: ${e.message} @ ${e.filename}:${e.lineno}`));
+    window.addEventListener('unhandledrejection', (e) => log(`unhandled rejection: ${e.reason?.message || e.reason}`));
+
+    const gridW = GRID.cols * GRID.cellSize, gridH = GRID.rows * GRID.cellSize;
+    const PAD = 16;
+    const scale = Math.min((canvas.width - 2 * PAD) / gridW, (canvas.height - 2 * PAD) / gridH);
+    const offX = PAD + (canvas.width - 2 * PAD - gridW * scale) / 2;
+    const offY = PAD + (canvas.height - 2 * PAD - gridH * scale) / 2;
+    const sx = (wx) => offX + (wx - GRID.originX) * scale;
+    const sy = (wy) => canvas.height - offY - (wy - GRID.originY) * scale;
+    const toWorld = (cx, cy) => ({
+      x: (cx - offX) / scale + GRID.originX,
+      y: (canvas.height - offY - cy) / scale + GRID.originY,
+    });
+    const gaussian = (s) => {
+      let u = 0, v = 0;
+      while (u === 0) u = Math.random();
+      while (v === 0) v = Math.random();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * s;
+    };
+    const fmtPose = (p) => `x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  θ ${p.theta.toFixed(2)}`;
+
+    let mapBitmap = null, mapCounts = { occ: 0, inf: 0 };
+    let fusedPose = null, odomPose = null, groundTruth = null;
+    let latestScan = null, path = null, goal = null;
+    let drawErrLogged = false;
+
+    const mapCanvas = document.createElement('canvas');
+    const mapCtx = mapCanvas.getContext('2d');
+    function rasterizeMap(map) {
+      const { cols, rows, occupied, occupiedInflated } = map;
+      mapCanvas.width = cols; mapCanvas.height = rows;
+      const img = mapCtx.createImageData(cols, rows);
+      let occ = 0, inf = 0;
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const gi = row * cols + col;
+          const pi = ((rows - 1 - row) * cols + col) * 4;
+          if (occupied[gi]) { img.data[pi] = 30; img.data[pi + 1] = 30; img.data[pi + 2] = 30; img.data[pi + 3] = 255; occ++; }
+          else if (occupiedInflated[gi]) { img.data[pi] = 180; img.data[pi + 1] = 180; img.data[pi + 2] = 180; img.data[pi + 3] = 150; inf++; }
+        }
+      }
+      mapCtx.putImageData(img, 0, 0);
+      mapBitmap = mapCanvas; mapCounts = { occ, inf };
+    }
+
+    function drawPose(p, color, dashed) {
+      const r = 0.11 * scale;
+      ctx.save();
+      ctx.translate(sx(p.x), sy(p.y));
+      ctx.rotate(-p.theta);
+      ctx.strokeStyle = color; ctx.lineWidth = 2;
+      ctx.setLineDash(dashed ? [4, 3] : []);
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, 2 * Math.PI); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(r * 1.8, 0); ctx.stroke();
+      ctx.restore();
+    }
+
+    function draw() {
+      try {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = '#ddd'; ctx.setLineDash([]);
+        ctx.strokeRect(sx(GRID.originX), sy(GRID.originY + gridH), gridW * scale, gridH * scale);
+        if (mapBitmap) {
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(mapBitmap, sx(GRID.originX), sy(GRID.originY + gridH), gridW * scale, gridH * scale);
+        }
+        if ($('showScan').checked && latestScan && fusedPose) {
+          ctx.fillStyle = '#e5484d';
+          const s = latestScan;
+          for (let i = 0; i < s.ranges.length; i++) {
+            const rng = s.ranges[i];
+            if (!(rng > 0) || rng >= s.rangeMax - 1e-6) continue;
+            const a = fusedPose.theta + s.angleMin + i * s.angleIncrement;
+            ctx.fillRect(sx(fusedPose.x + rng * Math.cos(a)) - 1, sy(fusedPose.y + rng * Math.sin(a)) - 1, 2, 2);
+          }
+        }
+        if (path && path.length) {
+          ctx.strokeStyle = '#3060c0'; ctx.lineWidth = 2; ctx.setLineDash([]);
+          ctx.beginPath(); ctx.moveTo(sx(path[0][0]), sy(path[0][1]));
+          for (const [x, y] of path.slice(1)) ctx.lineTo(sx(x), sy(y));
+          ctx.stroke();
+        }
+        if (goal) {
+          ctx.strokeStyle = '#c060c0'; ctx.lineWidth = 2; ctx.setLineDash([]);
+          const g = 6;
+          ctx.beginPath();
+          ctx.moveTo(sx(goal.x) - g, sy(goal.y)); ctx.lineTo(sx(goal.x) + g, sy(goal.y));
+          ctx.moveTo(sx(goal.x), sy(goal.y) - g); ctx.lineTo(sx(goal.x), sy(goal.y) + g);
+          ctx.stroke();
+        }
+        if ($('showOdom').checked && odomPose) drawPose(odomPose, '#999', true);
+        if (fusedPose) drawPose(fusedPose, '#2a7d2a', false);
+      } catch (err) {
+        if (!drawErrLogged) { drawErrLogged = true; log(`draw() error: ${err.message}`); }
+      }
+      requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+
+    let transport = null, bus = null, sensorWs = null, heartbeat = null, drive = null, manifest = null;
+    let odomNode = null, fusionNode = null, mapNode = null, plannerNode = null, followerNode = null;
+    let reqSeq = 0, lastReqId = null, lastCorrectionAt = 0, poseReady = false, mapping = false;
+
+    $('connectBtn').addEventListener('click', async () => {
+      if (transport) return;
+      $('connectBtn').disabled = true;
+      try {
+        log(`[1] loading manifest ${MANIFEST_URL}`);
+        manifest = await loadManifest(MANIFEST_URL);
+        const geometry = manifest.drive.geometry;
+        log(`    manifest ${manifest.robot}, geometry ${JSON.stringify(geometry)}`);
+
+        log(`[2] connecting ${ROBOTEQ_URL}`);
+        transport = new WebSocketTransport(ROBOTEQ_URL);
+        bus = new LocalBus(`ros-chromium/nav/${R}`);
+        await transport.connect();
+        statusEl.textContent = 'connected'; statusEl.className = 'connected';
+        log(`    connected`);
+
+        log(`[3] bring-up + keepalive`);
+        for (const line of manifest.drive.commands.init ?? []) {
+          await transport.send(transport.encode(line));
+          await new Promise((r) => setTimeout(r, 30));
+        }
+        drive = createDriveDevice(transport, manifest);
+        heartbeat = startHeartbeat(transport, { onSendError: (e) => log(`keepalive err: ${e.message || e}`) });
+        await drive.enable(); // !MG — motors come up disabled; the button re-arms after E-STOP / watchdog
+        log(`    !MG — motors enabled`);
+
+        log(`[4] OdometryNode + PoseFusionNode`);
+        odomNode = new OdometryNode(bus, transport, {
+          poseTopic: T.odom, geometry, encoderQuery: manifest.drive.readback?.encoder,
+        });
+        fusionNode = new PoseFusionNode(bus, { odomTopic: T.odom, correctionTopic: T.corr, fusedTopic: T.pose });
+
+        bus.subscribe(T.odom, (p) => { odomPose = p; $('kOdom').textContent = fmtPose(p); });
+        bus.subscribe(T.pose, (p) => { fusedPose = p; $('kPose').textContent = fmtPose(p); });
+        bus.subscribe(T.cmd, async ({ left, right }) => {
+          $('kCmd').textContent = `L ${left.toFixed(2)}  R ${right.toFixed(2)}`;
+          try { await drive.setVelocity(left, right); } catch (e) { log(`setVelocity: ${e.message || e}`); }
+        });
+
+        log(`[5] ready — click "Start mapping" to bring up MapNode/Planner/Follower + sensor stream`);
+        for (const b of ['mapBtn', 'enableBtn', 'estopBtn', 'clearBtn']) $(b).disabled = false;
+      } catch (err) {
+        log(`connect failed at some stage: ${err.stack || err.message || err}`);
+        statusEl.textContent = 'error'; statusEl.className = 'disconnected';
+      }
+    });
+
+    $('mapBtn').addEventListener('click', () => {
+      if (mapping || !bus) return;
+      mapping = true; $('mapBtn').disabled = true; $('resetMapBtn').disabled = false;
+      const geometry = manifest.drive.geometry;
+
+      log(`[m1] MapNode (grid ${GRID.cols}x${GRID.rows} @ ${GRID.cellSize}m)`);
+      mapNode = new MapNode(bus, {
+        scanTopic: T.scan, poseTopic: T.pose, mapTopic: T.map,
+        grid: GRID, inflationRadius: INFLATION_M, publishHz: 1,
+      });
+      bus.subscribe(T.map, (m) => {
+        rasterizeMap(m);
+        $('kMap').textContent = `${mapCounts.occ} wall / ${mapCounts.inf} inflated of ${m.cols}x${m.rows}`;
+      });
+
+      log(`[m2] PlannerNode (loads WASM) + PathFollowerNode`);
+      plannerNode = new PlannerNode(bus, { requestTopic: T.planReq, pathTopic: T.planRes });
+      followerNode = new PathFollowerNode(bus, {
+        pathTopic: T.path, poseTopic: T.pose, cmdTopic: T.cmd, geometry,
+        onGoalReached: () => { log('goal reached'); path = null; goal = null; },
+      });
+      bus.subscribe(T.planRes, ({ requestId, path: p, distance, error }) => {
+        if (requestId !== lastReqId) return;
+        if (error) { log(`plan failed: ${error}`); $('kPlan').textContent = `failed: ${error}`; path = null; return; }
+        path = p; $('kPlan').textContent = `${p.length} pts, ${distance.toFixed(2)} m`;
+        bus.publish(T.path, { path: p });
+        log(`plan ok: ${p.length} pts, ${distance.toFixed(2)} m`);
+      });
+
+      log(`[m3] sensor stream ${SENSOR_URL}`);
+      sensorWs = new WebSocket(SENSOR_URL);
+      sensorWs.binaryType = 'arraybuffer';
+      sensorWs.addEventListener('open', () => log(`    sensor connected`));
+      sensorWs.addEventListener('error', () => log(`    sensor ws error`));
+      let frameCount = 0;
+      sensorWs.addEventListener('message', (ev) => {
+        try {
+          const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data));
+          if (msg.type !== 'frame') return;
+          groundTruth = msg.groundTruth;
+          latestScan = msg.scan;
+          if (++frameCount % 30 === 0) log(`    ${frameCount} sensor frames`);
+
+          const now = Date.now();
+          if (now - lastCorrectionAt >= CORRECTION_MS) {
+            lastCorrectionAt = now;
+            bus.publish(T.corr, {
+              x: groundTruth.x + gaussian(SIG_M),
+              y: groundTruth.y + gaussian(SIG_M),
+              theta: groundTruth.theta + gaussian(SIG_RAD),
+            });
+            if (!poseReady) { poseReady = true; log('    pose seeded — mapping enabled'); }
+          }
+          if (poseReady) bus.publish(T.scan, latestScan);
+          if (groundTruth && odomPose) {
+            $('kDrift').textContent = `${Math.hypot(groundTruth.x - odomPose.x, groundTruth.y - odomPose.y).toFixed(3)} m`;
+          }
+        } catch (err) {
+          log(`sensor handler error: ${err.message}`);
+        }
+      });
+    });
+
+    $('enableBtn').addEventListener('click', () => drive?.enable().then(() => log('!MG — enabled')));
+    $('estopBtn').addEventListener('click', () => {
+      drive?.estop(); path = null; goal = null; bus?.publish(T.path, { path: [] }); log('E-STOP');
+    });
+    $('clearBtn').addEventListener('click', () => {
+      path = null; goal = null; bus?.publish(T.path, { path: [] }); bus?.publish(T.cmd, { left: 0, right: 0 });
+    });
+    $('resetMapBtn').addEventListener('click', () => { mapNode?.reset(); mapBitmap = null; log('map reset'); });
+
+    canvas.addEventListener('click', (ev) => {
+      if (!mapNode || !fusedPose) return log('need Start mapping + a pose first');
+      const rect = canvas.getBoundingClientRect();
+      const g = toWorld((ev.clientX - rect.left) * (canvas.width / rect.width),
+                        (ev.clientY - rect.top) * (canvas.height / rect.height));
+      goal = g;
+      const map = mapNode.snapshot();
+      lastReqId = `req-${++reqSeq}`;
+      bus.publish(T.planReq, {
+        requestId: lastReqId,
+        originX: map.originX, originY: map.originY, cellSize: map.cellSize, cols: map.cols, rows: map.rows,
+        occupied: map.occupiedInflated,
+        start: { x: fusedPose.x, y: fusedPose.y },
+        goal: { x: g.x, y: g.y },
+        algorithm: 'gridastar',
+      });
+      log(`goal (${g.x.toFixed(2)}, ${g.y.toFixed(2)}) — planning ${lastReqId}`);
+    });
+  </script>
+</body>
+</html>
