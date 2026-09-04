@@ -47,8 +47,12 @@ export class TeleopNode {
     clearInterval(this._timer);
   }
 
+  // Preferred slot first, then any connected pad. Chrome hands out slots in
+  // connection order and keeps them after disconnects, so a pad that shows
+  // up as "(index 1)" is common; polling only [0] then silently sends zeros.
   connectedGamepad() {
-    return navigator.getGamepads()[this._gamepadIndex] ?? null;
+    const pads = navigator.getGamepads();
+    return pads[this._gamepadIndex] ?? Array.from(pads).find(Boolean) ?? null;
   }
 
   _tick() {
