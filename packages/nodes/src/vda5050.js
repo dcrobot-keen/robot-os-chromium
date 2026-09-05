@@ -150,19 +150,37 @@ export class OrderTracker {
     return { ok: true, path: reduced.path };
   }
 
-  /** Mark nodes reached by the pose; returns how many were newly reached. */
+  /**
+   * Mark nodes reached by the pose; returns how many were newly reached.
+   * Not just the head: pure pursuit cuts corners and a noisy pose estimate can
+   * jump, so the robot may pass a node without ever coming within nodeReachedM
+   * of it while a LATER node is within reach. Every node up to the farthest
+   * one currently within the radius counts as traversed (VDA5050 only needs
+   * lastNodeId to move forward, never back).
+   */
   advance(pose) {
-    let reached = 0;
-    while (this.nodeStates.length > 0) {
-      const next = this.nodeStates[0];
-      if (Math.hypot(pose.x - next.nodePosition.x, pose.y - next.nodePosition.y) > this.nodeReachedM) break;
-      this.nodeStates.shift();
-      this.lastNodeId = next.nodeId;
-      this.lastNodeSequenceId = next.sequenceId;
-      this.edgeStates = this.edgeStates.filter((e) => e.sequenceId > next.sequenceId);
-      reached++;
+    let farthest = -1;
+    for (let i = 0; i < this.nodeStates.length; i++) {
+      const n = this.nodeStates[i];
+      if (Math.hypot(pose.x - n.nodePosition.x, pose.y - n.nodePosition.y) <= this.nodeReachedM) farthest = i;
     }
-    return reached;
+    if (farthest < 0) return 0;
+    return this._popThrough(farthest);
+  }
+
+  _popThrough(index) {
+    const done = this.nodeStates.splice(0, index + 1);
+    const last = done[done.length - 1];
+    this.lastNodeId = last.nodeId;
+    this.lastNodeSequenceId = last.sequenceId;
+    this.edgeStates = this.edgeStates.filter((e) => e.sequenceId > last.sequenceId);
+    return done.length;
+  }
+
+  /** The follower says it is at the end of the path: every remaining node counts as reached. */
+  complete() {
+    if (this.nodeStates.length === 0) return 0;
+    return this._popThrough(this.nodeStates.length - 1);
   }
 
   /** Waypoints not yet reached (what to re-send after a pause). */

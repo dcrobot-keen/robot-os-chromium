@@ -99,6 +99,11 @@ const ids = { manufacturer: 'dcrobot', serialNumber: 'tb3-sim-01' };
   check('edges before lastNode dropped only after their end node', tr.edgeStates.length === 2);
   check('advance: at n1 reaches n1 and drops e0', tr.advance({ x: 2, y: 0.05, theta: 0 }) === 1 && tr.lastNodeId === 'n1' && tr.edgeStates.map((e) => e.edgeId).join() === 'e1');
   check('remainingPath = unreached nodes', JSON.stringify(tr.remainingPath()) === '[[2,2]]');
+  const skip = new OrderTracker({ nodeReachedM: 0.3 });
+  skip.accept(pathToOrder([[0, 0], [1, 0], [2, 0], [3, 0]], { orderId: 'S', orderUpdateId: 0 }));
+  check('advance skips corner-cut nodes: pose at n2 marks n0..n2', skip.advance({ x: 2.05, y: 0.1, theta: 0 }) === 3 && skip.lastNodeId === 'n2' && skip.nodeStates.length === 1 && skip.edgeStates.map((e) => e.edgeId).join() === 'e2');
+  check('complete() marks the rest traversed', skip.complete() === 1 && skip.lastNodeId === 'n3' && !skip.hasActiveOrder && skip.edgeStates.length === 0);
+  check('complete() on an empty order is a no-op', skip.complete() === 0);
   const upd = tr.accept({ ...pathToOrder([[2, 0], [2, 2], [0, 2]], { orderId: 'A', orderUpdateId: 1 }) });
   check('newer orderUpdateId replaces nodes but keeps lastNodeId', upd.ok && tr.nodeStates.length === 3 && tr.lastNodeId === 'n1');
   check('new orderId resets lastNodeId', tr.accept(pathToOrder([[0, 0]], { orderId: 'B', orderUpdateId: 0 })).ok && tr.lastNodeId === '' && tr.orderId === 'B');
@@ -191,10 +196,19 @@ const ids = { manufacturer: 'dcrobot', serialNumber: 'tb3-sim-01' };
   check('cancelOrder: nodes empty, orderId kept, path [] sent', st.nodeStates.length === 0 && st.orderId === 'o1' && pathMsgs.at(-1).path.length === 0);
   check('unsupported action: FAILED + unsupportedAction warning', st.actionStates.some((a) => a.actionId === 'x1' && a.actionStatus === 'FAILED') && st.errors.some((e) => e.errorType === 'unsupportedAction'));
 
+  // follower reports goal reached while nodes remain -> completeOrder closes them
+  mqtt.inject(node.topics.order, pathToOrder([[0, 0], [5, 0], [9, 0]], { orderId: 'o2', orderUpdateId: 0 }));
+  bus.publish('tb3-sim-01/pose', { x: 0.05, y: 0, theta: 0 });
+  check('new order o2: n0 reached, 2 left', mqtt.last('state').nodeStates.length === 2);
+  node.completeOrder();
+  st = mqtt.last('state');
+  check('completeOrder: nodes 0, lastNodeId n2, not driving', st.nodeStates.length === 0 && st.lastNodeId === 'n2' && st.driving === false);
+
   // garbage
   const errsBefore = st.errors.length;
+  const pathCountBefore = pathMsgs.length;
   mqtt.inject(node.topics.order, 'not json {');
-  check('non-JSON order -> validationError, no path', mqtt.last('state').errors.length === errsBefore + 1 && pathMsgs.at(-1).path.length === 0);
+  check('non-JSON order -> validationError, no path', mqtt.last('state').errors.length === errsBefore + 1 && pathMsgs.length === pathCountBefore);
 
   // battery provider
   const withBattery = new Vda5050Node(new LocalBus('vda5050-smoke-b'), fakeMqtt(), {

@@ -46,6 +46,7 @@
 //
 // Run: node src/index.js
 // Env: SIM_ROBOTEQ_URL, SIM_SENSOR_URL, PATHFINDER_URL, ROBOT_ID,
+//      GOAL_TOLERANCE_M (PathFollowerNode goal radius, default 0.2),
 //      MQTT_URL (e.g. mqtt://mosquitto:1883; unset = no VDA5050), VDA_MANUFACTURER
 //      (default dcrobot), MAP_ID (VDA5050 mapId = pathfinder project, default
 //      "default"), VDA_NODE_REACHED_M (node-reached radius, default 0.35),
@@ -191,7 +192,13 @@ new PathFollowerNode(bus, {
   poseTopic: POSE_TOPIC, // the fused estimate, not ground truth -- see header comment
   cmdTopic: CMD_TOPIC,
   geometry: manifest.drive.geometry,
-  onGoalReached: () => log('goal reached'),
+  // 0.1 m (node default) is tighter than the fused estimate's error between
+  // corrections (~0.2 m at 2 s / 0.12 m/s), so the robot used to orbit the goal.
+  goalToleranceM: Number(process.env.GOAL_TOLERANCE_M ?? 0.2),
+  onGoalReached: () => {
+    log('goal reached');
+    vda?.completeOrder(); // VDA5050: close out any nodes the radius test skipped
+  },
 });
 
 // --- pathfinder relay: both the fused estimate (the real marker) and a

@@ -56,7 +56,18 @@ export function pursuitStep(path, pose, geometry, options = {}) {
     return { left: 0, right: 0, atGoal: true, lookaheadIndex: path.length - 1 };
   }
 
-  const { point: lookahead, index } = findLookaheadPoint(path, pose, lookaheadM, startIndex);
+  let { point: lookahead, index } = findLookaheadPoint(path, pose, lookaheadM, startIndex);
+  // Final approach: inside one lookahead of the goal aim straight at the goal
+  // and slow down in proportion to the remaining distance. Without this the
+  // robot arrives at cruise speed, overshoots the tolerance circle, and orbits
+  // the goal until the (noisy) pose estimate happens to fall inside it -- seen
+  // as a robot "circling for a minute before stopping" on the real map.
+  let v = cruiseMps;
+  if (distToGoal < lookaheadM) {
+    lookahead = goal;
+    index = path.length - 1;
+    v = cruiseMps * Math.max(0.3, distToGoal / lookaheadM);
+  }
   const local = toRobotFrame(lookahead, pose);
 
   // Pure pursuit is forward-only: if the target is well off the current
@@ -76,7 +87,6 @@ export function pursuitStep(path, pose, geometry, options = {}) {
   // positive distance away, or the still-distant goal (guarded above).
   const curvature = (2 * local.y) / l2;
 
-  const v = cruiseMps;
   const omega = v * curvature;
   const halfTrack = geometry.wheelSeparation / 2;
   const wheelLinearL = v - omega * halfTrack;

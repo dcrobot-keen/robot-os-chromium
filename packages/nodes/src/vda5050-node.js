@@ -167,6 +167,20 @@ export class Vda5050Node {
     return this._publish('state', this.stateMessage());
   }
 
+  /**
+   * Call when the path follower reports the goal reached (PathFollowerNode's
+   * onGoalReached): whatever nodes the radius test missed are marked traversed
+   * so the RCS sees the order finish instead of a stale "8 nodes left".
+   */
+  completeOrder() {
+    if (this._closed) return;
+    const n = this._tracker.complete();
+    this._paused = false;
+    this._pausedPath = null;
+    if (n > 0) this._log(`goal reached: ${n} remaining node(s) marked traversed (${this._tracker.lastNodeId})`);
+    this.publishState();
+  }
+
   publishVisualization() {
     if (this._closed) return null;
     return this._publish('visualization', { agvPosition: this._agvPosition(), velocity: { ...this._velocity } });
