@@ -41,6 +41,12 @@
       <label>iPhone map: <input type="file" id="sliceFile" accept=".json" /></label>
       <button id="setPoseBtn" disabled>Set pose (click)</button>
       <label><input type="checkbox" id="showOdom" checked /> odom ghost</label>
+      <span class="sep"></span>
+      <label>VDA5050 broker <input id="mqttUrl" value="ws://127.0.0.1:9001" size="20" /></label>
+      <label>serial <input id="robotSerial" value="tb3-nav-01" size="10" /></label>
+      <button id="vdaBtn" disabled>Connect VDA5050</button>
+      <label>VPS <input id="vpsUrl" placeholder="http://127.0.0.1:8000" size="20" /></label>
+      <button id="vpsBtn" disabled>Start VPS fix</button>
       <label><input type="checkbox" id="showScan" checked /> laser</label>
       <span class="legend">
         <span><i class="sw" style="background:#1e1e1e"></i>p(wall)→1</span>
@@ -63,6 +69,8 @@
       <div class="kv"><b>map cells</b><span id="kMap">–</span></div>
       <div class="kv"><b>last plan</b><span id="kPlan">–</span></div>
       <div class="kv"><b>cmd_vel</b><span id="kCmd">–</span></div>
+      <div class="kv"><b>vda5050</b><span id="kVda">–</span></div>
+      <div class="kv"><b>vps fix</b><span id="kVps">–</span></div>
       <div id="log"></div>
     </aside>
   </main>
@@ -75,6 +83,7 @@
       OdometryNode, PoseFusionNode, MapNode, PlannerNode, PathFollowerNode,
       gridConfigFromBounds,
       LocalizationNode, CostmapNode, buildLikelihoodField, parseSlicemap, slicemapGrid, wallMaskFromSlicemap,
+      Vda5050Node, adaptMqttJsClient, VpsCorrectionNode, createVpsLocalizeClient,
     } from '../../packages/nodes/src/index.js';
 
     const ROBOTEQ_URL = 'ws://127.0.0.1:8765';
@@ -85,8 +94,13 @@
       odom: `${R}/odom`, corr: `${R}/correction`, pose: `${R}/pose`, scan: `${R}/scan`,
       map: `${R}/map`, costmap: `${R}/costmap`,
       planReq: `${R}/plan-request`, planRes: `${R}/plan-result`,
-      path: `${R}/path`, cmd: `${R}/drive/cmd_vel`,
+      path: `${R}/path`, cmd: `${R}/drive/cmd_vel`, estop: `${R}/estop`,
     };
+    // Real-robot hooks (doc/vda5050-rcs.md): the RCS (pathfinder) talks VDA5050 over
+    // MQTT to this page, and VPS (vps-system /localize) replaces the ground-truth
+    // correction stand-in. Both are opt-in buttons so the simulator-only flow is unchanged.
+    let vdaNode = null, mqttClient = null, vpsNode = null, vpsStream = null;
+    const MAX_DEVIATION_M = 0.8; // safety stop: fused pose this far off the path -> drop it
     const GRID = gridConfigFromBounds({ minX: -1, minY: -1, maxX: 16, maxY: 12 }, 0.05);
     const INFLATION_M = 0.18;
     const CORRECTION_MS = 1500, SIG_M = 0.04, SIG_RAD = 0.03;
@@ -313,8 +327,18 @@
       plannerNode = new PlannerNode(bus, { requestTopic: T.planReq, pathTopic: T.planRes });
       followerNode = new PathFollowerNode(bus, {
         pathTopic: T.path, poseTopic: T.pose, cmdTopic: T.cmd, geometry,
-        onGoalReached: () => { log('goal reached'); path = null; goal = null; },
+        maxDeviationM: MAX_DEVIATION_M,
+        onGoalReached: () => { log('goal reached'); path = null; goal = null; vdaNode?.completeOrder(); },
+        onAbort: ({ reason, distance, limit }) => {
+          log(`SAFETY STOP: ${reason} -- ${distance.toFixed(2)} m off the path (limit ${limit} m)`);
+          path = null; goal = null;
+          vdaNode?.abortOrder(reason, `fused pose ${distance.toFixed(2)} m from the path (limit ${limit} m)`);
+        },
       });
+      // orders from the RCS arrive on T.path via Vda5050Node -- draw them like a local plan
+      bus.subscribe(T.path, ({ path: p }) => { path = p && p.length ? p : null; });
+      $('vdaBtn').disabled = false;
+      $('vpsBtn').disabled = false;
       bus.subscribe(T.planRes, ({ requestId, path: p, distance, error }) => {
         if (requestId !== lastReqId) return;
         if (error) { log(`plan failed: ${error}`); $('kPlan').textContent = `failed: ${error}`; path = null; return; }
@@ -368,7 +392,7 @@
           // LocalizationNode drives `correction` from scan matching when the
           // iPhone map is loaded; otherwise fall back to the throttled+noisy
           // ground-truth stand-in for a VPS fix.
-          if (!locNode && now - lastCorrectionAt >= CORRECTION_MS) {
+          if (!locNode && !vpsNode && now - lastCorrectionAt >= CORRECTION_MS) {
             lastCorrectionAt = now;
             bus.publish(T.corr, {
               x: groundTruth.x + gaussian(SIG_M),
@@ -396,8 +420,9 @@
       });
     });
 
-    $('enableBtn').addEventListener('click', () => drive?.enable().then(() => log('!MG — enabled')));
+    $('enableBtn').addEventListener('click', () => drive?.enable().then(() => { log('!MG — enabled'); bus?.publish(T.estop, { active: false }); }));
     $('estopBtn').addEventListener('click', () => {
+      bus?.publish(T.estop, { active: true }); // Vda5050Node -> safetyState.eStop MANUAL + stop
       drive?.estop(); path = null; goal = null; bus?.publish(T.path, { path: [] }); log('E-STOP');
     });
     $('clearBtn').addEventListener('click', () => {
@@ -476,6 +501,84 @@
         algorithm: 'gridastar',
       });
       log(`goal (${g.x.toFixed(2)}, ${g.y.toFixed(2)}) — planning ${lastReqId}`);
+    });
+
+    // ---------------- VDA5050 (robot side) ----------------
+    // Same Vda5050Node as apps/sim-driver, fed by the vendored mqtt.min.js
+    // (apps/dashboard/vendor/) over the broker's WebSocket listener (:9001).
+    function loadMqttLib() {
+      if (window.mqtt) return Promise.resolve(window.mqtt);
+      return new Promise((resolve, reject) => {
+        const sc = document.createElement('script');
+        sc.src = '/apps/dashboard/vendor/mqtt.min.js';
+        sc.onload = () => resolve(window.mqtt);
+        sc.onerror = () => reject(new Error('vendor/mqtt.min.js failed to load'));
+        document.head.appendChild(sc);
+      });
+    }
+    $('vdaBtn').addEventListener('click', async () => {
+      if (vdaNode) { vdaNode.close(); mqttClient?.end(); vdaNode = null; mqttClient = null; $('vdaBtn').textContent = 'Connect VDA5050'; $('kVda').textContent = 'off'; return; }
+      if (!bus) return log('start mapping first (the bus/follower must exist)');
+      const url = $('mqttUrl').value.trim(), serial = $('robotSerial').value.trim();
+      if (!url || !serial) return log('broker URL and serial required');
+      try {
+        const lib = await loadMqttLib();
+        const ids = { manufacturer: 'dcrobot', serialNumber: serial };
+        mqttClient = lib.connect(url, { clientId: `vda5050-${serial}-${Math.random().toString(16).slice(2, 8)}`, will: Vda5050Node.lastWill(ids), reconnectPeriod: 2000 });
+        mqttClient.on('connect', () => { log(`[vda] MQTT connected ${url}`); $('kVda').textContent = `${serial} online @ ${url}`; });
+        mqttClient.on('error', (e) => log(`[vda] MQTT error ${e.message || e}`));
+        mqttClient.on('offline', () => { $('kVda').textContent = `${serial} offline`; });
+        vdaNode = new Vda5050Node(bus, adaptMqttJsClient(mqttClient), {
+          ...ids, mapId: loadedSlice?.name ?? 'default',
+          poseTopic: T.pose, pathTopic: T.path, cmdTopic: T.cmd, estopTopic: T.estop,
+          log: (m) => log(`[vda] ${m}`),
+        });
+        $('vdaBtn').textContent = 'Disconnect VDA5050';
+      } catch (err) {
+        log(`[vda] ${err.message || err}`);
+      }
+    });
+
+    // ---------------- VPS correction (real localization) ----------------
+    // Camera frame -> vps-system POST /localize -> correction topic (replaces the
+    // ground-truth stand-in while running). Intrinsics: a webcam is roughly
+    // fx = fy ~ 0.9*width; a real deployment reads them from the camera manifest.
+    async function makeCameraCapture() {
+      vpsStream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: 'environment' } });
+      const video = document.createElement('video');
+      video.srcObject = vpsStream; video.muted = true; await video.play();
+      const cv = document.createElement('canvas');
+      cv.width = video.videoWidth || 640; cv.height = video.videoHeight || 480;
+      const cx = cv.getContext('2d');
+      return {
+        width: cv.width, height: cv.height,
+        capture: () => new Promise((resolve, reject) => {
+          cx.drawImage(video, 0, 0, cv.width, cv.height);
+          cv.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.85);
+        }),
+      };
+    }
+    $('vpsBtn').addEventListener('click', async () => {
+      if (vpsNode) { vpsNode.stop(); vpsNode = null; vpsStream?.getTracks().forEach((t) => t.stop()); $('vpsBtn').textContent = 'Start VPS fix'; $('kVps').textContent = 'off'; return; }
+      if (!bus) return log('start mapping first');
+      const url = $('vpsUrl').value.trim();
+      if (!url) return log('VPS URL required');
+      try {
+        const cam = await makeCameraCapture();
+        const f = 0.9 * cam.width;
+        const localize = createVpsLocalizeClient(url, { fx: f, fy: f, cx: cam.width / 2, cy: cam.height / 2, width: cam.width, height: cam.height });
+        vpsNode = new VpsCorrectionNode(bus, {
+          capture: cam.capture, localize, correctionTopic: T.corr, periodMs: 2000,
+          onFix: (pose, r) => { $('kVps').textContent = `${r.room_id} · ${pose.x.toFixed(2)}, ${pose.y.toFixed(2)} · inliers ${r.num_inliers}`; },
+          onMiss: (e) => { $('kVps').textContent = `miss: ${e.message}`; },
+          log: (m) => log(`[vps] ${m}`),
+        });
+        vpsNode.start();
+        $('vpsBtn').textContent = 'Stop VPS fix';
+        log(`[vps] correction loop started -> ${url}/localize (ground-truth stand-in paused)`);
+      } catch (err) {
+        log(`[vps] ${err.message || err}`);
+      }
     });
   </script>
 </body>

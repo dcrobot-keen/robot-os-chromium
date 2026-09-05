@@ -10,3 +10,4 @@ export * from './localization-node.js';
 export * from './costmap-node.js';
 export * from './vda5050.js';
 export * from './vda5050-node.js';
+export * from './vps-correction-node.js';

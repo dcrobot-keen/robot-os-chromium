@@ -47,6 +47,7 @@ export class Vda5050Node {
       visualizationIntervalMs = 100,
       nodeReachedM = 0.35,
       battery = null, // optional () => { batteryCharge, charging, ... }; omitted from state when null
+      estopTopic = null, // optional bus topic carrying { active: boolean } -> safetyState.eStop
       now = () => Date.now(),
       log = () => {},
     } = options;
@@ -74,6 +75,7 @@ export class Vda5050Node {
     this._pausedPath = null;
     this._errors = [];
     this._actionStates = [];
+    this._eStop = 'NONE';
     this._closed = false;
 
     this._topics = Object.fromEntries(
@@ -81,6 +83,7 @@ export class Vda5050Node {
     );
 
     this._unsubPose = bus.subscribe(poseTopic, (pose) => this._onPose(pose));
+    this._unsubEstop = estopTopic ? bus.subscribe(estopTopic, (m) => this._onEstop(m)) : null;
     this._unsubOrder = mqtt.subscribe(this._topics.order, (_topic, payload) => this._onOrder(payload));
     this._unsubActions = mqtt.subscribe(this._topics.instantActions, (_topic, payload) => this._onInstantActions(payload));
 
@@ -156,15 +159,44 @@ export class Vda5050Node {
       actionStates: this._actionStates.map((a) => ({ ...a })),
       operatingMode: 'AUTOMATIC',
       errors: this._errors.map((e) => ({ ...e })),
-      safetyState: { eStop: 'NONE', fieldViolation: false },
+      safetyState: { eStop: this._eStop, fieldViolation: false },
     };
-    if (this._battery) state.batteryState = this._battery();
+    if (this._battery) {
+      const b = this._battery();
+      if (b) state.batteryState = b;
+    }
     return state;
   }
 
   publishState() {
     if (this._closed) return null;
     return this._publish('state', this.stateMessage());
+  }
+
+  /**
+   * Safety abort from the follower (path deviation) or any watchdog: drop the
+   * order like cancelOrder, stop the base and report a FATAL error so the RCS
+   * shows why the robot stopped instead of a silent "driving: false".
+   */
+  abortOrder(errorType = 'pathDeviation', description = '') {
+    if (this._closed) return;
+    this._tracker.cancel();
+    this._paused = false;
+    this._pausedPath = null;
+    this._stopDriving();
+    this._pushError(errorType, description || errorType, 'FATAL', [{ referenceKey: 'orderId', referenceValue: this._tracker.orderId }]);
+    this._log(`order aborted: ${errorType} ${description}`);
+    this.publishState();
+  }
+
+  _onEstop(msg) {
+    const active = msg === true || msg?.active === true;
+    const next = active ? (msg?.kind === 'AUTOACK' ? 'AUTOACK' : 'MANUAL') : 'NONE';
+    if (next === this._eStop) return;
+    this._eStop = next;
+    if (active) this._stopDriving();
+    this._log(`eStop -> ${next}`);
+    this.publishState();
   }
 
   /**
@@ -300,6 +332,7 @@ export class Vda5050Node {
     this._publish('connection', { connectionState: 'OFFLINE' }, { qos: CONNECTION_QOS, retain: true });
     this._closed = true;
     this._unsubPose?.();
+    this._unsubEstop?.();
     this._unsubOrder?.();
     this._unsubActions?.();
   }

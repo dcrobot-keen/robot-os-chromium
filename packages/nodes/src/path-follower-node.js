@@ -105,8 +105,35 @@ export function pursuitStep(path, pose, geometry, options = {}) {
 
 // --- bus wiring ---------------------------------------------------------
 
+/** Distance from a pose to the closest point on the polyline (m). */
+export function distanceToPath(path, pose) {
+  if (!path || path.length === 0) return Infinity;
+  let best = Infinity;
+  for (let i = 0; i < path.length; i++) {
+    const [ax, ay] = path[i];
+    if (i + 1 < path.length) {
+      const [bx, by] = path[i + 1];
+      const dx = bx - ax, dy = by - ay;
+      const l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((pose.x - ax) * dx + (pose.y - ay) * dy) / l2)) : 0;
+      best = Math.min(best, Math.hypot(pose.x - (ax + t * dx), pose.y - (ay + t * dy)));
+    } else {
+      best = Math.min(best, Math.hypot(pose.x - ax, pose.y - ay));
+    }
+  }
+  return best;
+}
+
 export class PathFollowerNode {
-  constructor(bus, { pathTopic, poseTopic, cmdTopic, geometry, onGoalReached, ...pursuitOptions } = {}) {
+  /**
+   * maxDeviationM: safety stop -- if the (fused) pose drifts further than this
+   * from the given path the node drops the path, publishes zero velocity and
+   * calls onAbort({ reason: 'pathDeviation', distance }). A robot pushed off
+   * its path (collision, slipping wheels, a bad localization jump) must not
+   * keep driving toward a lookahead point through whatever is in the way.
+   * 0/undefined disables the check.
+   */
+  constructor(bus, { pathTopic, poseTopic, cmdTopic, geometry, onGoalReached, onAbort, maxDeviationM = 0, ...pursuitOptions } = {}) {
     if (!pathTopic || !poseTopic || !cmdTopic || !geometry) {
       throw new Error('PathFollowerNode requires pathTopic, poseTopic, cmdTopic, geometry');
     }
@@ -115,6 +142,8 @@ export class PathFollowerNode {
     this._geometry = geometry;
     this._pursuitOptions = pursuitOptions;
     this._onGoalReached = onGoalReached;
+    this._onAbort = onAbort;
+    this._maxDeviationM = maxDeviationM;
     this._path = null;
     this._lookaheadIndex = 0;
 
@@ -129,6 +158,15 @@ export class PathFollowerNode {
 
   _onPose(pose) {
     if (!this._path) return;
+    if (this._maxDeviationM > 0) {
+      const dev = distanceToPath(this._path, pose);
+      if (dev > this._maxDeviationM) {
+        this._path = null;
+        this._bus.publish(this._cmdTopic, { left: 0, right: 0 });
+        if (this._onAbort) this._onAbort({ reason: 'pathDeviation', distance: dev, limit: this._maxDeviationM });
+        return;
+      }
+    }
     const result = pursuitStep(this._path, pose, this._geometry, {
       ...this._pursuitOptions,
       startIndex: this._lookaheadIndex,

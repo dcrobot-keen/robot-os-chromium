@@ -47,6 +47,8 @@
 // Run: node src/index.js
 // Env: SIM_ROBOTEQ_URL, SIM_SENSOR_URL, PATHFINDER_URL, ROBOT_ID,
 //      GOAL_TOLERANCE_M (PathFollowerNode goal radius, default 0.2),
+//      MAX_DEVIATION_M (safety stop when the fused pose leaves the path, default 0.8; 0 = off),
+//      BATTERY_POLL_MS (Roboteq "?V 2" poll for VDA5050 batteryState, default 5000; 0 = off),
 //      MQTT_URL (e.g. mqtt://mosquitto:1883; unset = no VDA5050), VDA_MANUFACTURER
 //      (default dcrobot), MAP_ID (VDA5050 mapId = pathfinder project, default
 //      "default"), VDA_NODE_REACHED_M (node-reached radius, default 0.35),
@@ -75,6 +77,11 @@ const VDA_MANUFACTURER = process.env.VDA_MANUFACTURER || 'dcrobot';
 // from the same file (pathfinder POST /api/projects/from-slicemap).
 const MAP_ID = process.env.MAP_ID || '';
 const VDA_NODE_REACHED_M = Number(process.env.VDA_NODE_REACHED_M ?? 0.35);
+const MAX_DEVIATION_M = Number(process.env.MAX_DEVIATION_M ?? 0.8);
+const BATTERY_POLL_MS = Number(process.env.BATTERY_POLL_MS ?? 5000);
+// TB3 Burger 3-cell LiPo: 12.6 V full, ~11.0 V "go home". The simulator answers
+// "?V 2" with V=<volts*10> (a fixed 12.0 V today), so this mostly proves the plumbing.
+const BATTERY_FULL_V = 12.6, BATTERY_EMPTY_V = 11.0;
 // "VPS-like" measurement noise -- a real vps-system /localize fix has real
 // error too, so the correction isn't a free perfect fix (that would make
 // PoseFusionNode's job trivial and prove nothing).
@@ -195,9 +202,14 @@ new PathFollowerNode(bus, {
   // 0.1 m (node default) is tighter than the fused estimate's error between
   // corrections (~0.2 m at 2 s / 0.12 m/s), so the robot used to orbit the goal.
   goalToleranceM: Number(process.env.GOAL_TOLERANCE_M ?? 0.2),
+  maxDeviationM: MAX_DEVIATION_M,
   onGoalReached: () => {
     log('goal reached');
     vda?.completeOrder(); // VDA5050: close out any nodes the radius test skipped
+  },
+  onAbort: ({ reason, distance, limit }) => {
+    log(`SAFETY STOP: ${reason} (${distance.toFixed(2)} m off the path, limit ${limit} m)`);
+    vda?.abortOrder(reason, `fused pose ${distance.toFixed(2)} m from the path (limit ${limit} m)`);
   },
 });
 
@@ -226,6 +238,22 @@ if (!MQTT_URL) bus.subscribe(POSE_TOPIC, (fusedPose) => relayPoseToPathfinder(RO
 // `mqtt` package client is wrapped by adaptMqttJsClient. The client's last
 // will publishes CONNECTIONBROKEN on the connection topic if this process
 // dies without close().
+// --- battery: poll the Roboteq "?V 2" readback (manifest.drive.readback.battery) ---
+// Replies arrive on the same transport as OdometryNode's "?C" answers; we only
+// look at V= lines. Exposed to Vda5050Node as batteryState.
+let batteryVolts = null;
+if (BATTERY_POLL_MS > 0 && manifest.drive.readback?.battery) {
+  transport.onMessage((m) => {
+    if (m.type === 'reply' && m.key === 'V' && Array.isArray(m.values) && m.values.length) batteryVolts = m.values[m.values.length - 1] / 10;
+  });
+  setInterval(() => transport.send(transport.encode(manifest.drive.readback.battery)).catch(() => {}), BATTERY_POLL_MS);
+}
+const batteryState = () => {
+  if (batteryVolts == null) return undefined;
+  const pct = Math.max(0, Math.min(100, ((batteryVolts - BATTERY_EMPTY_V) / (BATTERY_FULL_V - BATTERY_EMPTY_V)) * 100));
+  return { batteryCharge: Math.round(pct), batteryVoltage: batteryVolts, charging: false };
+};
+
 let vda = null;
 if (MQTT_URL) {
   const { default: mqttLib } = await import('mqtt');
@@ -246,6 +274,7 @@ if (MQTT_URL) {
     pathTopic: PATH_TOPIC,
     cmdTopic: CMD_TOPIC,
     nodeReachedM: VDA_NODE_REACHED_M,
+    battery: BATTERY_POLL_MS > 0 ? () => batteryState() : null,
     log: (m) => log(`vda5050: ${m}`),
   });
   process.on('SIGINT', () => {
