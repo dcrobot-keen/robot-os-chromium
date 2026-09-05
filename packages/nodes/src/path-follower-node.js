@@ -124,6 +124,29 @@ export function distanceToPath(path, pose) {
   return best;
 }
 
+/** Checks whether any upcoming point along path is marked as occupied in costmap. */
+export function isPathBlocked(path, costmap, fromIndex = 0, checkAheadM = 0.6) {
+  if (!path || !costmap || !costmap.occupiedInflated) return false;
+  const { originX, originY, cellSize, cols, rows, occupiedInflated } = costmap;
+  let dist = 0;
+  for (let i = fromIndex; i < path.length; i++) {
+    const pt = path[i];
+    if (i > fromIndex) {
+      dist += Math.hypot(pt[0] - path[i - 1][0], pt[1] - path[i - 1][1]);
+      if (dist > checkAheadM) break;
+    }
+    const col = Math.floor((pt[0] - originX) / cellSize);
+    const row = Math.floor((pt[1] - originY) / cellSize);
+    if (col >= 0 && col < cols && row >= 0 && row < rows) {
+      const idx = row * cols + col;
+      if (occupiedInflated[idx]) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export class PathFollowerNode {
   /**
    * maxDeviationM: safety stop -- if the (fused) pose drifts further than this
@@ -132,8 +155,12 @@ export class PathFollowerNode {
    * its path (collision, slipping wheels, a bad localization jump) must not
    * keep driving toward a lookahead point through whatever is in the way.
    * 0/undefined disables the check.
+   *
+   * costmapTopic / onBlocked: dynamic obstacle stop & replanning hook -- if
+   * upcoming points along the path fall on occupied cells in the costmap, stops
+   * immediately and calls onBlocked({ path, pose, lookaheadIndex }).
    */
-  constructor(bus, { pathTopic, poseTopic, cmdTopic, geometry, onGoalReached, onAbort, maxDeviationM = 0, ...pursuitOptions } = {}) {
+  constructor(bus, { pathTopic, poseTopic, cmdTopic, geometry, onGoalReached, onAbort, maxDeviationM = 0, costmapTopic, onBlocked, checkAheadM = 0.6, ...pursuitOptions } = {}) {
     if (!pathTopic || !poseTopic || !cmdTopic || !geometry) {
       throw new Error('PathFollowerNode requires pathTopic, poseTopic, cmdTopic, geometry');
     }
@@ -144,11 +171,16 @@ export class PathFollowerNode {
     this._onGoalReached = onGoalReached;
     this._onAbort = onAbort;
     this._maxDeviationM = maxDeviationM;
+    this._onBlocked = onBlocked;
+    this._checkAheadM = checkAheadM;
+    this._costmap = null;
+    this._lastBlockedAt = 0;
     this._path = null;
     this._lookaheadIndex = 0;
 
     this._unsubPath = bus.subscribe(pathTopic, (msg) => this._onPath(msg));
     this._unsubPose = bus.subscribe(poseTopic, (pose) => this._onPose(pose));
+    this._unsubCostmap = costmapTopic ? bus.subscribe(costmapTopic, (cm) => { this._costmap = cm; }) : () => {};
   }
 
   _onPath({ path }) {
@@ -167,6 +199,15 @@ export class PathFollowerNode {
         return;
       }
     }
+    if (this._costmap && this._onBlocked && isPathBlocked(this._path, this._costmap, this._lookaheadIndex, this._checkAheadM)) {
+      this._bus.publish(this._cmdTopic, { left: 0, right: 0 });
+      const now = Date.now();
+      if (now - this._lastBlockedAt > 1000) {
+        this._lastBlockedAt = now;
+        this._onBlocked({ path: this._path, pose, lookaheadIndex: this._lookaheadIndex });
+      }
+      return;
+    }
     const result = pursuitStep(this._path, pose, this._geometry, {
       ...this._pursuitOptions,
       startIndex: this._lookaheadIndex,
@@ -182,6 +223,7 @@ export class PathFollowerNode {
   stop() {
     this._unsubPath();
     this._unsubPose();
+    this._unsubCostmap();
     this._bus.publish(this._cmdTopic, { left: 0, right: 0 });
   }
 }

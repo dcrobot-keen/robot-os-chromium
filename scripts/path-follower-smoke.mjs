@@ -7,7 +7,7 @@
 // just that pursuitStep() returns plausible-looking numbers for one pose.
 //
 //   node scripts/path-follower-smoke.mjs
-import { pursuitStep, toRobotFrame, findLookaheadPoint, PathFollowerNode } from '@ros-chromium/nodes';
+import { pursuitStep, toRobotFrame, findLookaheadPoint, PathFollowerNode, isPathBlocked } from '@ros-chromium/nodes';
 import { LocalBus } from '@ros-chromium/bus';
 
 let failures = 0;
@@ -139,6 +139,43 @@ function integrate(pose, left, right, dt) {
 
   bus.publish('pose', { x: 0.97, y: 0, theta: 0 }); // inside default goal tolerance
   check('PathFollowerNode: zero command once the goal is reached', commands.at(-1).left === 0 && commands.at(-1).right === 0);
+
+  node.stop();
+  bus.close();
+}
+
+// --- 8. Dynamic obstacle detection & onBlocked hook ---
+{
+  const bus = new LocalBus('path-follower-blocked-smoke');
+  const commands = [];
+  let blockedEvent = null;
+  bus.subscribe('cmd_vel', (c) => commands.push(c));
+
+  const costmap = {
+    originX: 0, originY: 0, cellSize: 0.1, cols: 20, rows: 20,
+    occupiedInflated: new Array(400).fill(false),
+  };
+  const path = [[0, 0], [0.2, 0], [0.4, 0], [1.0, 0]];
+
+  check('isPathBlocked: returns false when costmap is clear', !isPathBlocked(path, costmap, 0, 0.6));
+  costmap.occupiedInflated[4] = true; // (0.4, 0) -> col 4, row 0
+  check('isPathBlocked: returns true when upcoming path intersects obstacle', isPathBlocked(path, costmap, 0, 0.6));
+
+  const node = new PathFollowerNode(bus, {
+    pathTopic: 'path',
+    poseTopic: 'pose',
+    cmdTopic: 'cmd_vel',
+    costmapTopic: 'costmap',
+    geometry: TB3_GEOMETRY,
+    onBlocked: (evt) => { blockedEvent = evt; },
+  });
+
+  bus.publish('path', { path });
+  bus.publish('costmap', costmap);
+  bus.publish('pose', { x: 0, y: 0, theta: 0 });
+
+  check('PathFollowerNode: stops with zero command when path is blocked', commands.length === 1 && commands[0].left === 0 && commands[0].right === 0);
+  check('PathFollowerNode: calls onBlocked callback with path and pose', blockedEvent && blockedEvent.pose.x === 0);
 
   node.stop();
   bus.close();

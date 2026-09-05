@@ -328,11 +328,27 @@
       followerNode = new PathFollowerNode(bus, {
         pathTopic: T.path, poseTopic: T.pose, cmdTopic: T.cmd, geometry,
         maxDeviationM: MAX_DEVIATION_M,
+        costmapTopic: T.costmap,
         onGoalReached: () => { log('goal reached'); path = null; goal = null; vdaNode?.completeOrder(); },
         onAbort: ({ reason, distance, limit }) => {
           log(`SAFETY STOP: ${reason} -- ${distance.toFixed(2)} m off the path (limit ${limit} m)`);
           path = null; goal = null;
           vdaNode?.abortOrder(reason, `fused pose ${distance.toFixed(2)} m from the path (limit ${limit} m)`);
+        },
+        onBlocked: ({ path: p, pose }) => {
+          if (!goal) return;
+          const map = costmapLatest ?? mapNode?.snapshot();
+          if (!map) return;
+          log('path blocked by obstacle ahead — replanning...');
+          lastReqId = `replan-${++reqSeq}`;
+          bus.publish(T.planReq, {
+            requestId: lastReqId,
+            originX: map.originX, originY: map.originY, cellSize: map.cellSize, cols: map.cols, rows: map.rows,
+            occupied: map.occupiedInflated,
+            start: { x: pose.x, y: pose.y },
+            goal: { x: goal.x, y: goal.y },
+            algorithm: 'gridastar',
+          });
         },
       });
       // orders from the RCS arrive on T.path via Vda5050Node -- draw them like a local plan
