@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Glues the standalone simulator (../../../simulator) to pathfinder's closed-loop control relay: connects to the simulator's Roboteq (:8765) and sensor (:8766) endpoints like a real dashboard would, runs PathFollowerNode against the sensor stream's ground-truth pose, and relays that same pose to pathfinder's /api/live-pose so it shows on the real map too. Not a browser page -- everything it touches (WebSocketTransport, LocalBus) already runs unmodified in Node 22+.",
+  "description": "Glues the standalone simulator (../../../simulator) to pathfinder's closed-loop control relay: connects to the simulator's Roboteq (:8765) and sensor (:8766) endpoints like a real dashboard would, runs PathFollowerNode against the sensor stream's ground-truth pose, and relays that same pose to pathfinder's /api/live-pose so it shows on the real map too. Not a browser page -- everything it touches (WebSocketTransport, LocalBus) already runs unmodified in Node 22+. With MQTT_URL set it also runs Vda5050Node, publishing VDA5050 connection/state/visualization and taking order/instantActions from the broker (doc/vda5050-rcs.md).",
   "scripts": {
     "start": "node src/index.js"
   },
@@ -11,6 +11,7 @@
     "@ros-chromium/bus": "*",
     "@ros-chromium/device-abstraction": "*",
     "@ros-chromium/nodes": "*",
-    "@ros-chromium/transport": "*"
+    "@ros-chromium/transport": "*",
+    "mqtt": "^5.15.2"
   }
 }

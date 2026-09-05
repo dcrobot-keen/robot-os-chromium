@@ -36,8 +36,19 @@
 //   LocalBus "<robotId>/drive/cmd_vel"  --> drive.setVelocity(left, right)
 //                                        --> simulator :8765 (real Roboteq frames)
 //
+// With MQTT_URL set, Vda5050Node (packages/nodes) additionally speaks
+// VDA5050 to a broker -- doc/vda5050-rcs.md in the workspace root:
+//   LocalBus "<robotId>/pose"        --> MQTT uagv/v2/<manufacturer>/<robotId>/visualization + /state
+//   MQTT .../order                   --> LocalBus "<robotId>/path"   (same topic the HTTP relay feeds)
+//   MQTT .../instantActions          --> cancelOrder / stopPause / startPause
+// In that mode the fused pose is NOT also PUT to pathfinder's live-pose (the
+// RCS gets it over MQTT); the "-truth" debug marker still goes over HTTP.
+//
 // Run: node src/index.js
 // Env: SIM_ROBOTEQ_URL, SIM_SENSOR_URL, PATHFINDER_URL, ROBOT_ID,
+//      MQTT_URL (e.g. mqtt://mosquitto:1883; unset = no VDA5050), VDA_MANUFACTURER
+//      (default dcrobot), MAP_ID (VDA5050 mapId = pathfinder project, default
+//      "default"), VDA_NODE_REACHED_M (node-reached radius, default 0.35),
 //      SIM_ORIGIN_X, SIM_ORIGIN_Y (where the sim's local room sits on
 //      pathfinder's 200x400m plane -- default (0,0), move it if that
 //      overlaps something else on the map), CORRECTION_PERIOD_MS (how often
@@ -47,7 +58,7 @@ import { readFile } from 'node:fs/promises';
 import { WebSocketTransport, startHeartbeat } from '@ros-chromium/transport';
 import { createDriveDevice } from '@ros-chromium/device-abstraction';
 import { LocalBus } from '@ros-chromium/bus';
-import { PathFollowerNode, OdometryNode, PoseFusionNode, MapNode, gridConfigFromBounds } from '@ros-chromium/nodes';
+import { PathFollowerNode, OdometryNode, PoseFusionNode, MapNode, gridConfigFromBounds, Vda5050Node, adaptMqttJsClient } from '@ros-chromium/nodes';
 
 const ROBOTEQ_URL = process.env.SIM_ROBOTEQ_URL || 'ws://127.0.0.1:8765';
 const SENSOR_URL = process.env.SIM_SENSOR_URL || 'ws://127.0.0.1:8766';
@@ -56,6 +67,10 @@ const ROBOT_ID = process.env.ROBOT_ID || 'tb3-sim-01';
 const ORIGIN_X = Number(process.env.SIM_ORIGIN_X ?? 0);
 const ORIGIN_Y = Number(process.env.SIM_ORIGIN_Y ?? 0);
 const CORRECTION_PERIOD_MS = Number(process.env.CORRECTION_PERIOD_MS ?? 2000);
+const MQTT_URL = process.env.MQTT_URL || '';
+const VDA_MANUFACTURER = process.env.VDA_MANUFACTURER || 'dcrobot';
+const MAP_ID = process.env.MAP_ID || 'default';
+const VDA_NODE_REACHED_M = Number(process.env.VDA_NODE_REACHED_M ?? 0.35);
 // "VPS-like" measurement noise -- a real vps-system /localize fix has real
 // error too, so the correction isn't a free perfect fix (that would make
 // PoseFusionNode's job trivial and prove nothing).
@@ -194,7 +209,40 @@ function relayPoseToPathfinder(robotId, pose) {
     .catch((err) => log(`live-pose PUT to pathfinder failed (${robotId}): ${err.message || err}`));
   posePutQueues.set(robotId, next);
 }
-bus.subscribe(POSE_TOPIC, (fusedPose) => relayPoseToPathfinder(ROBOT_ID, fusedPose));
+if (!MQTT_URL) bus.subscribe(POSE_TOPIC, (fusedPose) => relayPoseToPathfinder(ROBOT_ID, fusedPose));
+
+// --- VDA5050 over MQTT (optional): the standard replacement for the two
+// HTTP relays above/below. Vda5050Node only sees { publish, subscribe }; the
+// `mqtt` package client is wrapped by adaptMqttJsClient. The client's last
+// will publishes CONNECTIONBROKEN on the connection topic if this process
+// dies without close().
+let vda = null;
+if (MQTT_URL) {
+  const { default: mqttLib } = await import('mqtt');
+  const ids = { manufacturer: VDA_MANUFACTURER, serialNumber: ROBOT_ID };
+  const client = mqttLib.connect(MQTT_URL, {
+    clientId: `vda5050-${ROBOT_ID}-${Math.random().toString(16).slice(2, 8)}`,
+    will: Vda5050Node.lastWill(ids),
+    reconnectPeriod: 2000,
+  });
+  client.on('connect', () => log(`MQTT connected ${MQTT_URL}`));
+  client.on('reconnect', () => log('MQTT reconnecting'));
+  client.on('error', (err) => log(`MQTT error: ${err.message || err}`));
+  await new Promise((resolve) => client.once('connect', resolve));
+  vda = new Vda5050Node(bus, adaptMqttJsClient(client), {
+    ...ids,
+    mapId: MAP_ID,
+    poseTopic: POSE_TOPIC,
+    pathTopic: PATH_TOPIC,
+    cmdTopic: CMD_TOPIC,
+    nodeReachedM: VDA_NODE_REACHED_M,
+    log: (m) => log(`vda5050: ${m}`),
+  });
+  process.on('SIGINT', () => {
+    vda.close();
+    client.end();
+  });
+}
 
 // --- sensor side: ground truth -> the "VPS-like" correction + debug marker ---
 // A real deployment has no ground truth at all -- vps-system's /localize

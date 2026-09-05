@@ -8,3 +8,5 @@ export * from './slicemap-prior.js';
 export * from './scan-matcher.js';
 export * from './localization-node.js';
 export * from './costmap-node.js';
+export * from './vda5050.js';
+export * from './vda5050-node.js';

@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "LocalBus nodes (roadmap.md Phase 7). TeleopNode (Gamepad API polling -> bus). PlannerNode (grid A*/Hybrid A* via @ros-chromium/planner-wasm). OdometryNode + PoseFusionNode (encoder ?C dead-reckoning + Kalman correction, replacing robot_localization's EKF). PathFollowerNode (pure pursuit). MapNode (LIDAR scan + pose -> occupancy grid in pathfinder's NewGridFromOccupancy shape). SafetyMonitorNode is still TODO. None run in their own Web Worker yet — see plan.md.",
+  "description": "LocalBus nodes (roadmap.md Phase 7). TeleopNode (Gamepad API polling -> bus). PlannerNode (grid A*/Hybrid A* via @ros-chromium/planner-wasm). OdometryNode + PoseFusionNode (encoder ?C dead-reckoning + Kalman correction, replacing robot_localization's EKF). PathFollowerNode (pure pursuit). MapNode (LIDAR scan + pose -> occupancy grid in pathfinder's NewGridFromOccupancy shape). Vda5050Node (LocalBus <-> VDA5050 MQTT topics, client injected; see doc/vda5050-rcs.md). SafetyMonitorNode is still TODO. None run in their own Web Worker yet — see plan.md.",
   "main": "src/index.js",
   "dependencies": {
     "@ros-chromium/planner-wasm": "*"
