@@ -53,6 +53,7 @@
 //      DYNAMIC_PERSIST (map updates a dynamic cell must persist before it blocks, default 8),
 //      BLOCK_CHECK (dynamic (default with SIM_SLICEMAP) | occupied | inflated | off),
 //      BATTERY_POLL_MS (Roboteq "?V 2" poll for VDA5050 batteryState, default 5000; 0 = off),
+//      ESTOP_POLL_MS (Roboteq "?DI" poll -> <robotId>/estop -> safetyState.eStop, default 500; 0 = off),
 //      MQTT_URL (e.g. mqtt://mosquitto:1883; unset = no VDA5050), VDA_MANUFACTURER
 //      (default dcrobot), MAP_ID (VDA5050 mapId = pathfinder project, default
 //      "default"), VDA_NODE_REACHED_M (node-reached radius, default 0.35),
@@ -334,6 +335,26 @@ if (BATTERY_POLL_MS > 0 && manifest.drive.readback?.battery) {
   });
   setInterval(() => transport.send(transport.encode(manifest.drive.readback.battery)).catch(() => {}), BATTERY_POLL_MS);
 }
+// --- E-STOP: poll the Roboteq digital input the manifest names (readback.estopButton, "?DI").
+// Bit 0 low = stop engaged (the simulator answers DI=0:0:0 after !EX or a watchdog trip; on
+// Former 2.0 the physical button lands on that input). Published on <robotId>/estop so
+// Vda5050Node reports safetyState.eStop and the RCS shows it.
+const ESTOP_TOPIC = `${ROBOT_ID}/estop`;
+const ESTOP_POLL_MS = Number(process.env.ESTOP_POLL_MS ?? 500);
+let estopActive = null;
+if (ESTOP_POLL_MS > 0 && manifest.drive.readback?.estopButton) {
+  transport.onMessage((m) => {
+    if (m.type !== 'reply' || m.key !== 'DI' || !Array.isArray(m.values) || !m.values.length) return;
+    const active = m.values[0] === 0;
+    if (active !== estopActive) {
+      estopActive = active;
+      log(active ? 'E-STOP engaged (DI bit 0 low)' : 'E-STOP released');
+      bus.publish(ESTOP_TOPIC, { active, source: 'roboteq-di' });
+    }
+  });
+  setInterval(() => transport.send(transport.encode(manifest.drive.readback.estopButton)).catch(() => {}), ESTOP_POLL_MS);
+}
+
 const batteryState = () => {
   if (batteryVolts == null) return undefined;
   const pct = Math.max(0, Math.min(100, ((batteryVolts - BATTERY_EMPTY_V) / (BATTERY_FULL_V - BATTERY_EMPTY_V)) * 100));
@@ -361,6 +382,7 @@ if (MQTT_URL) {
     cmdTopic: CMD_TOPIC,
     nodeReachedM: VDA_NODE_REACHED_M,
     battery: BATTERY_POLL_MS > 0 ? () => batteryState() : null,
+    estopTopic: ESTOP_TOPIC,
     log: (m) => log(`vda5050: ${m}`),
   });
   process.on('SIGINT', () => {

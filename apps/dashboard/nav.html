@@ -581,8 +581,20 @@
       if (!url) return log('VPS URL required');
       try {
         const cam = await makeCameraCapture();
-        const f = 0.9 * cam.width;
-        const localize = createVpsLocalizeClient(url, { fx: f, fy: f, cx: cam.width / 2, cy: cam.height / 2, width: cam.width, height: cam.height });
+        // Intrinsics: the robot manifest's `camera` block when it has one (the real robot's
+        // calibrated values, scaled to the capture size); otherwise a webcam approximation.
+        let intr;
+        const mc = manifest?.camera;
+        if (mc && [mc.fx, mc.fy, mc.cx, mc.cy, mc.width, mc.height].every(Number.isFinite)) {
+          const sx = cam.width / mc.width, sy = cam.height / mc.height;
+          intr = { fx: mc.fx * sx, fy: mc.fy * sy, cx: mc.cx * sx, cy: mc.cy * sy, width: cam.width, height: cam.height };
+          log(`[vps] intrinsics from manifest camera (${mc.width}x${mc.height} -> ${cam.width}x${cam.height})`);
+        } else {
+          const f = 0.9 * cam.width;
+          intr = { fx: f, fy: f, cx: cam.width / 2, cy: cam.height / 2, width: cam.width, height: cam.height };
+          log('[vps] no camera block in the manifest -- using the webcam approximation fx = 0.9 * width');
+        }
+        const localize = createVpsLocalizeClient(url, intr);
         vpsNode = new VpsCorrectionNode(bus, {
           capture: cam.capture, localize, correctionTopic: T.corr, periodMs: 2000,
           onFix: (pose, r) => { $('kVps').textContent = `${r.room_id} · ${pose.x.toFixed(2)}, ${pose.y.toFixed(2)} · inliers ${r.num_inliers}`; },
