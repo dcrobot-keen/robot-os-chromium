@@ -203,6 +203,11 @@ new PathFollowerNode(bus, {
   // corrections (~0.2 m at 2 s / 0.12 m/s), so the robot used to orbit the goal.
   goalToleranceM: Number(process.env.GOAL_TOLERANCE_M ?? 0.2),
   maxDeviationM: MAX_DEVIATION_M,
+  costmapTopic: MAP_TOPIC,
+  onBlocked: ({ lookaheadIndex }) => {
+    log(`SAFETY STOP: path blocked ahead by dynamic obstacle (waypoint index ${lookaheadIndex})`);
+    vda?.abortOrder('obstacleBlocked', `path blocked ahead by obstacle at waypoint ${lookaheadIndex}`);
+  },
   onGoalReached: () => {
     log('goal reached');
     vda?.completeOrder(); // VDA5050: close out any nodes the radius test skipped
