@@ -48,6 +48,7 @@
 // Env: SIM_ROBOTEQ_URL, SIM_SENSOR_URL, PATHFINDER_URL, ROBOT_ID,
 //      GOAL_TOLERANCE_M (PathFollowerNode goal radius, default 0.2),
 //      MAX_DEVIATION_M (safety stop when the fused pose leaves the path, default 0.8; 0 = off),
+//      BLOCK_CHECK (dynamic-obstacle stop against the LIDAR map: off (default) | occupied | inflated),
 //      BATTERY_POLL_MS (Roboteq "?V 2" poll for VDA5050 batteryState, default 5000; 0 = off),
 //      MQTT_URL (e.g. mqtt://mosquitto:1883; unset = no VDA5050), VDA_MANUFACTURER
 //      (default dcrobot), MAP_ID (VDA5050 mapId = pathfinder project, default
@@ -78,6 +79,12 @@ const VDA_MANUFACTURER = process.env.VDA_MANUFACTURER || 'dcrobot';
 const MAP_ID = process.env.MAP_ID || '';
 const VDA_NODE_REACHED_M = Number(process.env.VDA_NODE_REACHED_M ?? 0.35);
 const MAX_DEVIATION_M = Number(process.env.MAX_DEVIATION_M ?? 0.8);
+// Default OFF: even raw LIDAR cells flag pathfinder-planned paths that run 0.15-0.2 m from
+// walls (sensor noise + 0.2-0.4 m fused-pose error shift the live map against the slicemap the
+// path was planned on). Measured 2026-09-05: two false aborts in two drives. A trustworthy
+// dynamic stop needs a costmap that subtracts the known static walls (nav.html's CostmapNode
+// flow) or a path planned on this very grid; until then this is opt-in for experiments.
+const BLOCK_CHECK = (process.env.BLOCK_CHECK || 'off').toLowerCase(); // off | occupied | inflated
 const BATTERY_POLL_MS = Number(process.env.BATTERY_POLL_MS ?? 5000);
 // TB3 Burger 3-cell LiPo: 12.6 V full, ~11.0 V "go home". The simulator answers
 // "?V 2" with V=<volts*10> (a fixed 12.0 V today), so this mostly proves the plumbing.
@@ -203,7 +210,9 @@ new PathFollowerNode(bus, {
   // corrections (~0.2 m at 2 s / 0.12 m/s), so the robot used to orbit the goal.
   goalToleranceM: Number(process.env.GOAL_TOLERANCE_M ?? 0.2),
   maxDeviationM: MAX_DEVIATION_M,
-  costmapTopic: MAP_TOPIC,
+  // Dynamic-obstacle stop against MapNode's LIDAR grid (opt-in, see BLOCK_CHECK above).
+  costmapTopic: BLOCK_CHECK === 'off' ? undefined : MAP_TOPIC,
+  blockedLayer: BLOCK_CHECK === 'inflated' ? 'inflated' : 'occupied',
   onBlocked: ({ lookaheadIndex }) => {
     log(`SAFETY STOP: path blocked ahead by dynamic obstacle (waypoint index ${lookaheadIndex})`);
     vda?.abortOrder('obstacleBlocked', `path blocked ahead by obstacle at waypoint ${lookaheadIndex}`);

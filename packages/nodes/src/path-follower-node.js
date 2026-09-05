@@ -125,9 +125,16 @@ export function distanceToPath(path, pose) {
 }
 
 /** Checks whether any upcoming point along path is marked as occupied in costmap. */
-export function isPathBlocked(path, costmap, fromIndex = 0, checkAheadM = 0.6) {
-  if (!path || !costmap || !costmap.occupiedInflated) return false;
-  const { originX, originY, cellSize, cols, rows, occupiedInflated } = costmap;
+export function isPathBlocked(path, costmap, fromIndex = 0, checkAheadM = 0.6, layer = 'inflated') {
+  // layer 'inflated' is right when the path was planned on THIS costmap (nav.html:
+  // PlannerNode and the check share the grid). When the path comes from another
+  // planner with its own clearance (pathfinder's slicemap + robot-radius inflation
+  // in sim-driver), the LIDAR map's inflation ring overlaps a perfectly good path
+  // and every drive along a wall aborts -- use layer 'occupied' (raw hits) there.
+  const cells = layer === 'occupied' ? costmap?.occupied : costmap?.occupiedInflated;
+  if (!path || !costmap || !cells) return false;
+  const { originX, originY, cellSize, cols, rows } = costmap;
+  const occupiedInflated = cells;
   let dist = 0;
   for (let i = fromIndex; i < path.length; i++) {
     const pt = path[i];
@@ -160,7 +167,7 @@ export class PathFollowerNode {
    * upcoming points along the path fall on occupied cells in the costmap, stops
    * immediately and calls onBlocked({ path, pose, lookaheadIndex }).
    */
-  constructor(bus, { pathTopic, poseTopic, cmdTopic, geometry, onGoalReached, onAbort, maxDeviationM = 0, costmapTopic, onBlocked, checkAheadM = 0.6, ...pursuitOptions } = {}) {
+  constructor(bus, { pathTopic, poseTopic, cmdTopic, geometry, onGoalReached, onAbort, maxDeviationM = 0, costmapTopic, onBlocked, checkAheadM = 0.6, blockedLayer = 'inflated', ...pursuitOptions } = {}) {
     if (!pathTopic || !poseTopic || !cmdTopic || !geometry) {
       throw new Error('PathFollowerNode requires pathTopic, poseTopic, cmdTopic, geometry');
     }
@@ -173,6 +180,7 @@ export class PathFollowerNode {
     this._maxDeviationM = maxDeviationM;
     this._onBlocked = onBlocked;
     this._checkAheadM = checkAheadM;
+    this._blockedLayer = blockedLayer;
     this._costmap = null;
     this._lastBlockedAt = 0;
     this._path = null;
@@ -199,7 +207,7 @@ export class PathFollowerNode {
         return;
       }
     }
-    if (this._costmap && this._onBlocked && isPathBlocked(this._path, this._costmap, this._lookaheadIndex, this._checkAheadM)) {
+    if (this._costmap && this._onBlocked && isPathBlocked(this._path, this._costmap, this._lookaheadIndex, this._checkAheadM, this._blockedLayer)) {
       this._bus.publish(this._cmdTopic, { left: 0, right: 0 });
       const now = Date.now();
       if (now - this._lastBlockedAt > 1000) {
