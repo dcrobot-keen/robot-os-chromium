@@ -48,7 +48,10 @@
 // Env: SIM_ROBOTEQ_URL, SIM_SENSOR_URL, PATHFINDER_URL, ROBOT_ID,
 //      GOAL_TOLERANCE_M (PathFollowerNode goal radius, default 0.2),
 //      MAX_DEVIATION_M (safety stop when the fused pose leaves the path, default 0.8; 0 = off),
-//      BLOCK_CHECK (dynamic-obstacle stop against the LIDAR map: off (default) | occupied | inflated),
+//      SIM_SLICEMAP (slicemap the world came from -> static layer; e.g. the SIM_WORLD value),
+//      STATIC_MARGIN_M (dilation of the static layer before subtracting, default 0.5),
+//      DYNAMIC_PERSIST (map updates a dynamic cell must persist before it blocks, default 8),
+//      BLOCK_CHECK (dynamic (default with SIM_SLICEMAP) | occupied | inflated | off),
 //      BATTERY_POLL_MS (Roboteq "?V 2" poll for VDA5050 batteryState, default 5000; 0 = off),
 //      MQTT_URL (e.g. mqtt://mosquitto:1883; unset = no VDA5050), VDA_MANUFACTURER
 //      (default dcrobot), MAP_ID (VDA5050 mapId = pathfinder project, default
@@ -62,7 +65,8 @@ import { readFile } from 'node:fs/promises';
 import { WebSocketTransport, startHeartbeat } from '@ros-chromium/transport';
 import { createDriveDevice } from '@ros-chromium/device-abstraction';
 import { LocalBus } from '@ros-chromium/bus';
-import { PathFollowerNode, OdometryNode, PoseFusionNode, MapNode, gridConfigFromBounds, Vda5050Node, adaptMqttJsClient } from '@ros-chromium/nodes';
+import { PathFollowerNode, OdometryNode, PoseFusionNode, MapNode, CostmapNode, gridConfigFromBounds, parseSlicemap, inflateOccupancy, Vda5050Node, adaptMqttJsClient } from '@ros-chromium/nodes';
+import { existsSync } from 'node:fs';
 
 const ROBOTEQ_URL = process.env.SIM_ROBOTEQ_URL || 'ws://127.0.0.1:8765';
 const SENSOR_URL = process.env.SIM_SENSOR_URL || 'ws://127.0.0.1:8766';
@@ -79,12 +83,20 @@ const VDA_MANUFACTURER = process.env.VDA_MANUFACTURER || 'dcrobot';
 const MAP_ID = process.env.MAP_ID || '';
 const VDA_NODE_REACHED_M = Number(process.env.VDA_NODE_REACHED_M ?? 0.35);
 const MAX_DEVIATION_M = Number(process.env.MAX_DEVIATION_M ?? 0.8);
-// Default OFF: even raw LIDAR cells flag pathfinder-planned paths that run 0.15-0.2 m from
-// walls (sensor noise + 0.2-0.4 m fused-pose error shift the live map against the slicemap the
-// path was planned on). Measured 2026-09-05: two false aborts in two drives. A trustworthy
-// dynamic stop needs a costmap that subtracts the known static walls (nav.html's CostmapNode
-// flow) or a path planned on this very grid; until then this is opt-in for experiments.
-const BLOCK_CHECK = (process.env.BLOCK_CHECK || 'off').toLowerCase(); // off | occupied | inflated
+// Dynamic-obstacle stop. Checking pathfinder-planned paths against the raw/inflated LIDAR
+// map aborted every wall-side drive (the path keeps 0.15-0.2 m from slicemap walls; sensor
+// noise + 0.2-0.4 m fused-pose error land those cells on it). The trustworthy version is
+// the 'dynamic' layer: CostmapNode subtracts a static mask built from the SAME slicemap the
+// world (and pathfinder's plan) came from, dilated by STATIC_MARGIN_M so wobbling wall hits
+// don't count, and only what is left -- a new box, a person -- stops the robot.
+// SIM_SLICEMAP (path under /app/simulator, e.g. the SIM_WORLD value) enables it.
+const SIM_SLICEMAP = process.env.SIM_SLICEMAP || '';
+const STATIC_MARGIN_M = Number(process.env.STATIC_MARGIN_M ?? 0.5);
+// consecutive MapNode updates a cell must stay dynamic before it can stop the robot: filters
+// the wall hits a heading jump paints 0.4-0.6 m off the wall for a few frames (seen 2026-09-05).
+const DYNAMIC_PERSIST = Number(process.env.DYNAMIC_PERSIST ?? 8);
+const BLOCK_CHECK = (process.env.BLOCK_CHECK || (SIM_SLICEMAP ? 'dynamic' : 'off')).toLowerCase(); // dynamic | occupied | inflated | off
+const COSTMAP_TOPIC = `${ROBOT_ID}/costmap`;
 const BATTERY_POLL_MS = Number(process.env.BATTERY_POLL_MS ?? 5000);
 // TB3 Burger 3-cell LiPo: 12.6 V full, ~11.0 V "go home". The simulator answers
 // "?V 2" with V=<volts*10> (a fixed 12.0 V today), so this mostly proves the plumbing.
@@ -178,10 +190,29 @@ new PoseFusionNode(bus, {
 // Poses on POSE_TOPIC already live in pathfinder's plane (ORIGIN offset
 // applied below), so the grid is defined there too and MapNode's output
 // drops straight into a PlannerNode request.
-const mapGrid = gridConfigFromBounds(
-  { minX: ORIGIN_X - MAP_SPAN, minY: ORIGIN_Y - MAP_SPAN, maxX: ORIGIN_X + MAP_SPAN, maxY: ORIGIN_Y + MAP_SPAN },
-  MAP_CELL
-);
+// With a slicemap world the grid IS the slicemap grid placed like the simulator places it:
+// grid corner at (ORIGIN_X, ORIGIN_Y) -- see simulator/src/slicemap.js toWorld and pathfinder's
+// server/slicemap.mjs, which drop the slicemap's own origin the same way.
+let staticSlice = null;
+if (SIM_SLICEMAP) {
+  const p = SIM_SLICEMAP.startsWith('/') ? SIM_SLICEMAP : new URL(`../../../../simulator/${SIM_SLICEMAP}`, import.meta.url).pathname;
+  const path = decodeURIComponent(p);
+  if (!existsSync(path)) log(`SIM_SLICEMAP ${path} not found -- dynamic block check off`);
+  else {
+    try {
+      staticSlice = parseSlicemap(JSON.parse(await readFile(path, 'utf-8')));
+      log(`static layer from slicemap ${path} (${staticSlice.cols}x${staticSlice.rows} @ ${staticSlice.resolution} m)`);
+    } catch (err) {
+      log(`SIM_SLICEMAP unreadable (${err.message}) -- dynamic block check off`);
+    }
+  }
+}
+const mapGrid = staticSlice
+  ? { originX: ORIGIN_X, originY: ORIGIN_Y, cellSize: staticSlice.resolution, cols: staticSlice.cols, rows: staticSlice.rows }
+  : gridConfigFromBounds(
+      { minX: ORIGIN_X - MAP_SPAN, minY: ORIGIN_Y - MAP_SPAN, maxX: ORIGIN_X + MAP_SPAN, maxY: ORIGIN_Y + MAP_SPAN },
+      MAP_CELL
+    );
 let lastMapLogAt = 0;
 // eslint-disable-next-line no-new -- wires itself up via the bus subscriptions in its constructor
 new MapNode(bus, {
@@ -198,7 +229,35 @@ new MapNode(bus, {
     log(`map: ${occ} occupied / ${inf} inflated of ${map.cols}x${map.rows} cells`);
   },
 });
-log(`MapNode grid ${mapGrid.cols}x${mapGrid.rows} @ ${MAP_CELL}m, origin (${mapGrid.originX.toFixed(2)}, ${mapGrid.originY.toFixed(2)}), inflation ${MAP_INFLATION}m`);
+log(`MapNode grid ${mapGrid.cols}x${mapGrid.rows} @ ${mapGrid.cellSize}m, origin (${mapGrid.originX.toFixed(2)}, ${mapGrid.originY.toFixed(2)}), inflation ${MAP_INFLATION}m`);
+
+// --- costmap: static (slicemap walls+furniture, dilated) vs dynamic (everything else) ---
+let costmapNode = null;
+if (staticSlice && BLOCK_CHECK !== 'off') {
+  const staticRaw = Array.from(staticSlice.codes, (c) => c === 2 || c === 3);
+  // The simulator's world boundary (bounds rectangle) is a wall for the LIDAR but not a
+  // slicemap cell -- add the outer ring so boundary hits don't read as dynamic obstacles.
+  for (let c = 0; c < mapGrid.cols; c++) { staticRaw[c] = true; staticRaw[(mapGrid.rows - 1) * mapGrid.cols + c] = true; }
+  for (let r = 0; r < mapGrid.rows; r++) { staticRaw[r * mapGrid.cols] = true; staticRaw[r * mapGrid.cols + mapGrid.cols - 1] = true; }
+  const staticMask = inflateOccupancy(staticRaw, mapGrid, STATIC_MARGIN_M);
+  let lastCostmapLog = 0;
+  costmapNode = new CostmapNode(bus, {
+    mapTopic: MAP_TOPIC, costmapTopic: COSTMAP_TOPIC, poseTopic: POSE_TOPIC,
+    staticOccupied: staticMask, grid: mapGrid,
+    inflationRadius: MAP_INFLATION, dynamicInflationRadius: MAP_INFLATION, dynamicPersistUpdates: DYNAMIC_PERSIST, dynThreshold: 0.6,
+    onUpdate: (cm) => {
+      // log every 5 s, or every 0.5 s while something dynamic is visible (debug the transients)
+      if (Date.now() - lastCostmapLog < (cm.dynamicCount > 0 ? 500 : 5000)) return;
+      lastCostmapLog = Date.now();
+      const sample = [];
+      for (let i = 0; i < cm.dynamic.length && sample.length < 3; i++) {
+        if (cm.dynamic[i]) sample.push(`(${(cm.originX + ((i % cm.cols) + 0.5) * cm.cellSize).toFixed(2)}, ${(cm.originY + (Math.floor(i / cm.cols) + 0.5) * cm.cellSize).toFixed(2)})`);
+      }
+      log(`costmap: ${cm.dynamicCount} dynamic cells (${cm.dynamicPersistentCount} persistent >${DYNAMIC_PERSIST} updates) beyond the static layer (margin ${STATIC_MARGIN_M} m)${sample.length ? ' e.g. ' + sample.join(' ') : ''}`);
+    },
+  });
+  log(`CostmapNode: static mask ${staticMask.reduce((n, v) => n + (v ? 1 : 0), 0)} cells, block check layer '${BLOCK_CHECK}'`);
+}
 
 // eslint-disable-next-line no-new -- wires itself up via the bus subscriptions in its constructor
 new PathFollowerNode(bus, {
@@ -210,12 +269,14 @@ new PathFollowerNode(bus, {
   // corrections (~0.2 m at 2 s / 0.12 m/s), so the robot used to orbit the goal.
   goalToleranceM: Number(process.env.GOAL_TOLERANCE_M ?? 0.2),
   maxDeviationM: MAX_DEVIATION_M,
-  // Dynamic-obstacle stop against MapNode's LIDAR grid (opt-in, see BLOCK_CHECK above).
-  costmapTopic: BLOCK_CHECK === 'off' ? undefined : MAP_TOPIC,
-  blockedLayer: BLOCK_CHECK === 'inflated' ? 'inflated' : 'occupied',
-  onBlocked: ({ lookaheadIndex }) => {
-    log(`SAFETY STOP: path blocked ahead by dynamic obstacle (waypoint index ${lookaheadIndex})`);
-    vda?.abortOrder('obstacleBlocked', `path blocked ahead by obstacle at waypoint ${lookaheadIndex}`);
+  // Dynamic-obstacle stop (see BLOCK_CHECK above): 'dynamic' reads CostmapNode's
+  // dynamicInflated; 'occupied'/'inflated' fall back to MapNode's raw grid (experiments).
+  costmapTopic: BLOCK_CHECK === 'off' ? undefined : BLOCK_CHECK === 'dynamic' ? (costmapNode ? COSTMAP_TOPIC : undefined) : MAP_TOPIC,
+  blockedLayer: BLOCK_CHECK,
+  onBlocked: ({ pose, blockedIndex, blockedPoint }) => {
+    const at = blockedPoint ? `(${blockedPoint[0].toFixed(2)}, ${blockedPoint[1].toFixed(2)})` : '?';
+    log(`SAFETY STOP: path blocked by dynamic obstacle at waypoint ${blockedIndex} ${at}, robot at (${pose.x.toFixed(2)}, ${pose.y.toFixed(2)}, ${pose.theta.toFixed(2)})`);
+    vda?.abortOrder('obstacleBlocked', `path blocked by obstacle at waypoint ${blockedIndex} ${at}`);
   },
   onGoalReached: () => {
     log('goal reached');

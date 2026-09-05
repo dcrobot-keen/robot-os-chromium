@@ -131,7 +131,9 @@ export function isPathBlocked(path, costmap, fromIndex = 0, checkAheadM = 0.6, l
   // planner with its own clearance (pathfinder's slicemap + robot-radius inflation
   // in sim-driver), the LIDAR map's inflation ring overlaps a perfectly good path
   // and every drive along a wall aborts -- use layer 'occupied' (raw hits) there.
-  const cells = layer === 'occupied' ? costmap?.occupied : costmap?.occupiedInflated;
+  // layer 'dynamic' = CostmapNode's dynamicInflated (live hits minus the static walls the
+  // path was planned around) -- the layer to use when the path came from another planner.
+  const cells = layer === 'occupied' ? costmap?.occupied : layer === 'dynamic' ? costmap?.dynamicInflated : costmap?.occupiedInflated;
   if (!path || !costmap || !cells) return false;
   const { originX, originY, cellSize, cols, rows } = costmap;
   const occupiedInflated = cells;
@@ -147,7 +149,8 @@ export function isPathBlocked(path, costmap, fromIndex = 0, checkAheadM = 0.6, l
     if (col >= 0 && col < cols && row >= 0 && row < rows) {
       const idx = row * cols + col;
       if (occupiedInflated[idx]) {
-        return true;
+        // truthy: which path point is blocked (object, so `=== true` callers need `!!`)
+        return { index: i, point: [pt[0], pt[1]] };
       }
     }
   }
@@ -207,12 +210,15 @@ export class PathFollowerNode {
         return;
       }
     }
-    if (this._costmap && this._onBlocked && isPathBlocked(this._path, this._costmap, this._lookaheadIndex, this._checkAheadM, this._blockedLayer)) {
+    const blocked = this._costmap && this._onBlocked
+      ? isPathBlocked(this._path, this._costmap, this._lookaheadIndex, this._checkAheadM, this._blockedLayer)
+      : false;
+    if (blocked) {
       this._bus.publish(this._cmdTopic, { left: 0, right: 0 });
       const now = Date.now();
       if (now - this._lastBlockedAt > 1000) {
         this._lastBlockedAt = now;
-        this._onBlocked({ path: this._path, pose, lookaheadIndex: this._lookaheadIndex });
+        this._onBlocked({ path: this._path, pose, lookaheadIndex: this._lookaheadIndex, blockedIndex: blocked.index, blockedPoint: blocked.point });
       }
       return;
     }

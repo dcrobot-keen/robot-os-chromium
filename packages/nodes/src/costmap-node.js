@@ -29,6 +29,10 @@ export class CostmapNode {
    * @param {ArrayLike<number|boolean>} opts.staticOccupied - row-major, length cols*rows
    * @param {{originX,originY,cellSize,cols,rows}} opts.grid - must match mapTopic's grid + staticOccupied
    * @param {number} [opts.inflationRadius=0]
+   * @param {number} [opts.dynamicInflationRadius=inflationRadius] - inflation of the dynamic-only layer
+   * @param {number} [opts.dynamicPersistUpdates=0] - a cell must be dynamic for this many consecutive
+   *   map updates before it enters dynamicInflated (0 = immediately). Filters the transients a
+   *   pose jump / heading lag paints when wall hits land past the static margin for a moment.
    * @param {number} [opts.robotClearRadius=inflationRadius]
    * @param {number} [opts.dynThreshold=0.6] - live prob (0..1) above this = a dynamic obstacle
    * @param {string} [opts.poseTopic] - if given, the pose cell is force-cleared in occupiedInflated
@@ -36,7 +40,7 @@ export class CostmapNode {
    */
   constructor(bus, {
     mapTopic, costmapTopic, staticOccupied, grid,
-    inflationRadius = 0, robotClearRadius, dynThreshold = 0.6,
+    inflationRadius = 0, dynamicInflationRadius, dynamicPersistUpdates = 0, robotClearRadius, dynThreshold = 0.6,
     poseTopic, onUpdate,
   } = {}) {
     if (!mapTopic || !costmapTopic || !staticOccupied || !grid) {
@@ -54,6 +58,9 @@ export class CostmapNode {
     };
     this._static = Uint8Array.from(staticOccupied, (v) => (v ? 1 : 0));
     this._inflationRadius = inflationRadius;
+    this._dynamicInflationRadius = dynamicInflationRadius ?? inflationRadius;
+    this._dynamicPersistUpdates = dynamicPersistUpdates;
+    this._dynAge = new Uint16Array(n); // consecutive updates each cell has been dynamic
     this._robotClearRadius = robotClearRadius ?? inflationRadius;
     this._dynThreshold = dynThreshold;
     this._onUpdate = onUpdate;
@@ -73,19 +80,35 @@ export class CostmapNode {
     const n = c.cols * c.rows;
     const thr255 = this._dynThreshold * 255;
     const occupied = new Array(n);
-    let dyn = 0;
+    // dynamic = live hits that are NOT in the static layer: what a path planned on the
+    // static map could not have known about. Published separately (+ inflated) so a
+    // follower can stop for a new box without mistaking a wall it already cleared for one.
+    const dynamic = new Array(n);
+    const persistent = new Array(n);
+    let dyn = 0, persisted = 0;
+    const need = this._dynamicPersistUpdates;
     for (let i = 0; i < n; i++) {
       const live = m.prob ? m.prob[i] > thr255 : !!(m.occupied && m.occupied[i]);
-      if (live && !this._static[i]) dyn++;
+      const isDyn = live && !this._static[i];
+      if (isDyn) dyn++;
+      dynamic[i] = isDyn;
+      this._dynAge[i] = isDyn ? Math.min(65535, this._dynAge[i] + 1) : 0;
+      const ok = isDyn && this._dynAge[i] > need;
+      persistent[i] = ok;
+      if (ok) persisted++;
       occupied[i] = this._static[i] === 1 || live;
     }
     const occupiedInflated = inflateOccupancy(occupied, c, this._inflationRadius);
-    if (this._pose) clearDisc(occupiedInflated, c, this._pose.x, this._pose.y, this._robotClearRadius);
+    const dynamicInflated = inflateOccupancy(persistent, c, this._dynamicInflationRadius);
+    if (this._pose) {
+      clearDisc(occupiedInflated, c, this._pose.x, this._pose.y, this._robotClearRadius);
+      clearDisc(dynamicInflated, c, this._pose.x, this._pose.y, this._robotClearRadius);
+    }
 
     const costmap = {
       originX: c.originX, originY: c.originY, cellSize: c.cellSize, cols: c.cols, rows: c.rows,
-      occupied, occupiedInflated,
-      staticCount: this._staticCount, dynamicCount: dyn,
+      occupied, occupiedInflated, dynamic, dynamicInflated,
+      staticCount: this._staticCount, dynamicCount: dyn, dynamicPersistentCount: persisted,
       updatedAt: Date.now(),
     };
     this._bus.publish(this._costmapTopic, costmap);

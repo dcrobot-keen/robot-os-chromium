@@ -9,7 +9,7 @@
 import { LocalBus } from '@ros-chromium/bus';
 import {
   VpsCorrectionNode, arkitPoseToGroundPose, applyFrame, vpsResultToPose, createVpsLocalizeClient,
-  PathFollowerNode, distanceToPath, Vda5050Node, pathToOrder,
+  PathFollowerNode, distanceToPath, isPathBlocked, Vda5050Node, pathToOrder, CostmapNode, inflateOccupancy,
 } from '@ros-chromium/nodes';
 
 let failures = 0;
@@ -120,6 +120,52 @@ const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
   check('after abort the path is dropped (no more commands)', cmds.length === n);
   follower.stop();
   bus.close();
+}
+
+// --- 2b. CostmapNode dynamic layer: static walls never count as dynamic obstacles ---
+{
+  // 10x10 grid @ 0.1 m; static wall at col 5 (x = 0.5..0.6), dilated 0.1 m
+  const grid = { originX: 0, originY: 0, cellSize: 0.1, cols: 10, rows: 10 };
+  const staticRaw = new Array(100).fill(false);
+  for (let r = 0; r < 10; r++) staticRaw[r * 10 + 5] = true;
+  const staticMask = inflateOccupancy(staticRaw, grid, 0.1);
+  const bus = new LocalBus('dyn-smoke');
+  let costmap = null;
+  const node = new CostmapNode(bus, { mapTopic: 'm', costmapTopic: 'cm', staticOccupied: staticMask, grid, inflationRadius: 0.1, dynamicInflationRadius: 0.1 });
+  bus.subscribe('cm', (cm) => { costmap = cm; });
+  // live map: the wall seen (plus 1 cell of noise next to it) + a new box at col 2,row 2
+  const occupied = new Array(100).fill(false);
+  for (let r = 0; r < 10; r++) { occupied[r * 10 + 5] = true; occupied[r * 10 + 4] = true; }
+  occupied[2 * 10 + 2] = true;
+  bus.publish('m', { ...grid, occupied });
+  check('costmap publishes dynamic + dynamicInflated layers', costmap && Array.isArray(costmap.dynamic) && Array.isArray(costmap.dynamicInflated));
+  check('wall hits (and noise inside the margin) are NOT dynamic', costmap.dynamic[3 * 10 + 5] === false && costmap.dynamic[3 * 10 + 4] === false);
+  check('the new box IS dynamic and inflated', costmap.dynamic[2 * 10 + 2] === true && costmap.dynamicInflated[2 * 10 + 3] === true && costmap.dynamicCount === 1);
+  // a path hugging the wall at x = 0.35 is fine on the dynamic layer, blocked on the inflated one
+  const wallPath = [[0.35, 0.05], [0.35, 0.55], [0.35, 0.95]];
+  check("isPathBlocked 'dynamic': wall-hugging path passes", isPathBlocked(wallPath, costmap, 0, 5, 'dynamic') === false);
+  check("isPathBlocked 'inflated': the same path is (wrongly) blocked", !!isPathBlocked(wallPath, costmap, 0, 5, 'inflated'));
+  const boxPath = [[0.05, 0.25], [0.25, 0.25], [0.45, 0.25]];
+  check("isPathBlocked 'dynamic': a path through the new box is blocked", isPathBlocked(boxPath, costmap, 0, 5, 'dynamic')?.index === 1);
+  node.stop();
+  bus.close();
+
+  // persistence: with dynamicPersistUpdates 2 a cell needs 3 consecutive dynamic updates
+  const bus2 = new LocalBus('dyn-smoke-2');
+  let cm2 = null;
+  const node2 = new CostmapNode(bus2, { mapTopic: 'm', costmapTopic: 'cm', staticOccupied: staticMask, grid, inflationRadius: 0.1, dynamicPersistUpdates: 2 });
+  bus2.subscribe('cm', (cm) => { cm2 = cm; });
+  const box = new Array(100).fill(false); box[2 * 10 + 2] = true;
+  bus2.publish('m', { ...grid, occupied: box });
+  bus2.publish('m', { ...grid, occupied: box });
+  check('persistence: 2 updates -> dynamic seen but not yet in dynamicInflated', cm2.dynamicCount === 1 && cm2.dynamicPersistentCount === 0 && cm2.dynamicInflated[2 * 10 + 2] === false);
+  bus2.publish('m', { ...grid, occupied: box });
+  check('persistence: 3rd update -> enters dynamicInflated', cm2.dynamicPersistentCount === 1 && cm2.dynamicInflated[2 * 10 + 2] === true);
+  bus2.publish('m', { ...grid, occupied: new Array(100).fill(false) });
+  bus2.publish('m', { ...grid, occupied: box });
+  check('persistence: a gap resets the counter', cm2.dynamicPersistentCount === 0);
+  node2.stop();
+  bus2.close();
 }
 
 // --- 3. Vda5050Node abortOrder + estop ---
