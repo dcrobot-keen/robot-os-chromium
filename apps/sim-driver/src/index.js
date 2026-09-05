@@ -146,7 +146,18 @@ const bus = new LocalBus('sim-driver');
 
 // --- drive side: simulator's Roboteq endpoint, same as a real dashboard ---
 const transport = new WebSocketTransport(ROBOTEQ_URL);
-await transport.connect();
+// The simulator may still be starting (compose brings both up together): retry for a while
+// instead of dying on the first refused connection.
+for (let attempt = 1; ; attempt++) {
+  try {
+    await transport.connect();
+    break;
+  } catch (err) {
+    if (attempt >= 30) throw err;
+    log(`simulator Roboteq endpoint ${ROBOTEQ_URL} not ready (${err.message || err}) -- retry ${attempt}/30 in 2 s`);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
 log(`connected to simulator Roboteq endpoint ${ROBOTEQ_URL}`);
 const drive = createDriveDevice(transport, manifest);
 // createDriveDevice doesn't send the init sequence itself (see its header
