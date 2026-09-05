@@ -93,6 +93,19 @@ export class Vda5050Node {
     return { ...this._topics };
   }
 
+  get mapId() {
+    return this._mapId;
+  }
+
+  /** Change the mapId reported in agvPosition (e.g. once the simulator tells us its world name). */
+  setMapId(mapId) {
+    if (typeof mapId === 'string' && mapId && mapId !== this._mapId) {
+      this._mapId = mapId;
+      this._log(`mapId -> ${mapId}`);
+      this.publishState();
+    }
+  }
+
   /** What to register as the MQTT client's last will: CONNECTIONBROKEN, retained. */
   static lastWill(ids) {
     return {

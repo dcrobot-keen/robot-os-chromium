@@ -69,7 +69,10 @@ const ORIGIN_Y = Number(process.env.SIM_ORIGIN_Y ?? 0);
 const CORRECTION_PERIOD_MS = Number(process.env.CORRECTION_PERIOD_MS ?? 2000);
 const MQTT_URL = process.env.MQTT_URL || '';
 const VDA_MANUFACTURER = process.env.VDA_MANUFACTURER || 'dcrobot';
-const MAP_ID = process.env.MAP_ID || 'default';
+// VDA5050 mapId. Unset -> taken from the simulator's world name (its hello
+// message), which for a published slicemap equals the pathfinder project made
+// from the same file (pathfinder POST /api/projects/from-slicemap).
+const MAP_ID = process.env.MAP_ID || '';
 const VDA_NODE_REACHED_M = Number(process.env.VDA_NODE_REACHED_M ?? 0.35);
 // "VPS-like" measurement noise -- a real vps-system /localize fix has real
 // error too, so the correction isn't a free perfect fix (that would make
@@ -231,7 +234,7 @@ if (MQTT_URL) {
   await new Promise((resolve) => client.once('connect', resolve));
   vda = new Vda5050Node(bus, adaptMqttJsClient(client), {
     ...ids,
-    mapId: MAP_ID,
+    mapId: MAP_ID || 'default',
     poseTopic: POSE_TOPIC,
     pathTopic: PATH_TOPIC,
     cmdTopic: CMD_TOPIC,
@@ -257,6 +260,7 @@ const sensorWs = new WebSocket(SENSOR_URL);
 sensorWs.addEventListener('open', () => log(`connected to simulator sensor stream ${SENSOR_URL}`));
 sensorWs.addEventListener('message', (event) => {
   const msg = JSON.parse(event.data);
+  if (msg.type === 'hello' && !MAP_ID && msg.world?.name) vda?.setMapId(msg.world.name);
   if (msg.type !== 'frame') return; // the first message is {type:'hello', ...}
 
   // laser scan -> bus, for MapNode. ranges/angles are robot-relative, so no
